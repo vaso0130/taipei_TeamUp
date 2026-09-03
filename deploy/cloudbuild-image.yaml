@@ -1,0 +1,21 @@
+# 手動建置並推送 API 映像：
+#   gcloud builds submit --config deploy/cloudbuild-image.yaml --project <PROJECT_ID> .
+substitutions:
+  _REGION: asia-east1
+  _AR_REPO: teamup
+  _SERVICE: teamup-api
+  _TAG: manual
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE}:${_TAG}
+      - -f
+      - apps/api/Dockerfile
+      - .
+
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE}:${_TAG}

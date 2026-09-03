@@ -1,0 +1,70 @@
+import type { ReportReason } from '@teamup/shared'
+
+export interface ReportRecord {
+  id: string
+  messageId: string
+  reporterUserId: string
+  reason: ReportReason
+  /** 'pending' until the escalation review (auto or human) lands. */
+  status: 'pending' | 'resolved'
+  createdAt: string
+}
+
+export interface ReportRepository {
+  /** Returns null when this reporter already reported this message. */
+  create(record: ReportRecord): Promise<ReportRecord | null>
+  /** Latest-first reports against one message (context for the reviewer). */
+  listByMessage(messageId: string): Promise<ReportRecord[]>
+  /** Which of these messages the viewer has reported (for the UI). */
+  reportedMessageIds(reporterUserId: string, messageIds: string[]): Promise<Set<string>>
+  /** Mark every report on the message resolved once a verdict lands. */
+  resolveForMessage(messageId: string): Promise<void>
+  /** Every report, newest first (admin risk overview; field-test scale). */
+  listAll(): Promise<ReportRecord[]>
+}
+
+export class MemoryReportRepository implements ReportRepository {
+  private readonly records: ReportRecord[] = []
+
+  create(record: ReportRecord): Promise<ReportRecord | null> {
+    const duplicate = this.records.some(
+      (r) => r.messageId === record.messageId && r.reporterUserId === record.reporterUserId,
+    )
+    if (duplicate) return Promise.resolve(null)
+    this.records.push({ ...record })
+    return Promise.resolve({ ...record })
+  }
+
+  listByMessage(messageId: string): Promise<ReportRecord[]> {
+    return Promise.resolve(
+      this.records
+        .filter((r) => r.messageId === messageId)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .map((r) => ({ ...r })),
+    )
+  }
+
+  reportedMessageIds(reporterUserId: string, messageIds: string[]): Promise<Set<string>> {
+    const wanted = new Set(messageIds)
+    const found = new Set<string>()
+    for (const r of this.records) {
+      if (r.reporterUserId === reporterUserId && wanted.has(r.messageId)) found.add(r.messageId)
+    }
+    return Promise.resolve(found)
+  }
+
+  resolveForMessage(messageId: string): Promise<void> {
+    for (const r of this.records) {
+      if (r.messageId === messageId) r.status = 'resolved'
+    }
+    return Promise.resolve()
+  }
+
+  listAll(): Promise<ReportRecord[]> {
+    return Promise.resolve(
+      [...this.records]
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .map((r) => ({ ...r })),
+    )
+  }
+}

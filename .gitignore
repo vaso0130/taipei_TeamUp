@@ -1,0 +1,54 @@
+# Dependencies
+node_modules/
+
+# Environment files — never commit secrets
+.env
+.env.*
+!.env.example
+
+# Keys and certificates
+*.key
+*.pem
+*.p12
+*.pfx
+service-account*.json
+
+# Build output
+dist/
+build/
+.output/
+coverage/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Test artifacts
+playwright-report/
+test-results/
+
+# Local tooling caches
+.eslintcache
+*.tsbuildinfo
+
+# Other
+hackathon-teamup-plan.md
+CLAUDE.md
+DECISIONS.md
+docs/deployment.local.md
+
+# Firebase CLI local state
+.firebase/
+firebase-debug.log
+
+# Local agent tooling (third-party skills and their generated output)
+.claude/
+design-system/

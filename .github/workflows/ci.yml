@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gitleaks:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-test:
+    name: Lint / Typecheck / Test / Build
+    runs-on: ubuntu-latest
+    services:
+      # Integration tests (concurrency constraints) run against real
+      # PostgreSQL; locally without DATABASE_URL they are skipped.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: teamup
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: teamup
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U teamup"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+        env:
+          DATABASE_URL: postgres://teamup:ci-only-password@localhost:5432/teamup
+      - run: pnpm build
+
+  e2e:
+    name: Browser E2E (Playwright)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: teamup
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: teamup
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U teamup"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://teamup:ci-only-password@localhost:5432/teamup
+      AUTH_PROVIDER: dev
+      KEK_PROVIDER: local
+      EMAIL_HMAC_PEPPER: ci-only-pepper-not-a-real-secret-0123456789
+      MODERATION_PROVIDER: mock
+      MODERATION_QUEUE: in-process
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Generate a CI-only KEK
+        run: echo "LOCAL_KEK_BASE64=$(node -e 'console.log(require("crypto").randomBytes(32).toString("base64"))')" >> "$GITHUB_ENV"
+      - run: pnpm --filter @teamup/api db:migrate
+      - run: pnpm seed
+      - run: npx playwright install --with-deps chromium
+      - run: pnpm e2e

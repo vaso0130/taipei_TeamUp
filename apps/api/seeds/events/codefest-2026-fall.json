@@ -1,0 +1,43 @@
+{
+  "event": {
+    "slug": "codefest-2026-fall",
+    "name": "2026 臺北秋季程式設計節 黑客松組隊",
+    "description": "為 2026 臺北秋季程式設計節黑客松尋找隊友的媒合活動。本平台僅協助組隊，報名請至比賽官方網站完成；未滿 18 歲者，法定代理人同意書由比賽主辦單位收取，本平台不經手。",
+    "startsAt": "2026-11-07T09:00:00+08:00",
+    "endsAt": "2026-11-08T18:00:00+08:00",
+    "recruitClosesAt": "2026-10-30T23:59:59+08:00",
+    "minMembers": 4,
+    "maxMembers": 5,
+    "exclusiveMembership": true,
+    "requiredContacts": 2,
+    "requiresAdultCheck": true,
+    "termTeam": "隊伍",
+    "termMember": "成員",
+    "status": "open",
+    "retentionDays": 90,
+    "maxCustomTags": 5,
+    "customTagMaxLength": 16
+  },
+  "roles": [
+    { "key": "planner", "label": "專案規劃師", "sortOrder": 1 },
+    { "key": "data_engineer", "label": "資料工程師", "sortOrder": 2 },
+    { "key": "frontend", "label": "前端工程師", "sortOrder": 3 },
+    { "key": "backend", "label": "後端工程師", "sortOrder": 4 }
+  ],
+  "skills": [
+    { "key": "git", "label": "Git", "category": "工具鏈", "sortOrder": 1 },
+    { "key": "docker", "label": "Docker", "category": "工具鏈", "sortOrder": 2 },
+    { "key": "postman", "label": "Postman", "category": "工具鏈", "sortOrder": 3 },
+    { "key": "html", "label": "HTML", "category": "前端", "sortOrder": 11 },
+    { "key": "css", "label": "CSS", "category": "前端", "sortOrder": 12 },
+    { "key": "javascript", "label": "JavaScript", "category": "前端", "sortOrder": 13 },
+    { "key": "vue", "label": "Vue", "category": "前端", "sortOrder": 14 },
+    { "key": "spring", "label": "Spring Framework", "category": "後端", "sortOrder": 21 },
+    { "key": "hibernate", "label": "Hibernate", "category": "後端", "sortOrder": 22 },
+    { "key": "tomcat", "label": "Tomcat", "category": "後端", "sortOrder": 23 },
+    { "key": "flutter", "label": "Flutter", "category": "行動開發", "sortOrder": 31 },
+    { "key": "dart", "label": "Dart", "category": "行動開發", "sortOrder": 32 },
+    { "key": "civic_knowledge", "label": "市政知識", "category": "領域知識", "sortOrder": 41 },
+    { "key": "open_data", "label": "開放資料", "category": "領域知識", "sortOrder": 42 }
+  ]
+}

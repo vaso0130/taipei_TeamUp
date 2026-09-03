@@ -1,0 +1,38 @@
+# 在 Cloud Build（GCP 內網）執行資料庫 migration 與 seed——
+# 開發機網路無法直連 Cloud SQL 時的標準做法：
+#   gcloud builds submit --config deploy/cloudbuild-migrate.yaml \
+#     --substitutions=_INSTANCE=<PROJECT_ID>:<REGION>:<SQL_INSTANCE> \
+#     --project <PROJECT_ID> .
+substitutions:
+  # Cloud SQL instance connection name — always pass the real value via
+  # --substitutions; the default is a placeholder.
+  _INSTANCE: PROJECT_ID:REGION:INSTANCE
+  _PROXY_VERSION: v2.15.2
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - id: migrate-and-seed
+    name: node:24
+    entrypoint: bash
+    secretEnv: ['MIGRATE_DB_URL']
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        curl -sSL -o /workspace/cloud-sql-proxy \
+          https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/${_PROXY_VERSION}/cloud-sql-proxy.linux.amd64
+        chmod +x /workspace/cloud-sql-proxy
+        /workspace/cloud-sql-proxy --port 5432 ${_INSTANCE} &
+        sleep 5
+        corepack enable pnpm
+        pnpm install --frozen-lockfile --filter @teamup/api...
+        cd apps/api
+        DATABASE_URL="$$MIGRATE_DB_URL" pnpm db:migrate
+        DATABASE_URL="$$MIGRATE_DB_URL" pnpm seed
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/${PROJECT_ID}/secrets/teamup-migrate-db-url/versions/latest
+      env: MIGRATE_DB_URL

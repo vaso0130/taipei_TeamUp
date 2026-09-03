@@ -1,0 +1,22 @@
+# 本機開發用 PostgreSQL。
+# 帳密僅供本機使用（localhost），非任何環境的真實密碼。
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: teamup-db
+    environment:
+      POSTGRES_USER: teamup
+      POSTGRES_PASSWORD: localdev
+      POSTGRES_DB: teamup
+    ports:
+      - "5432:5432"
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U teamup -d teamup"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  dbdata:

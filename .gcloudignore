@@ -1,0 +1,17 @@
+.git
+.gitignore
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+coverage/
+.env
+.env.*
+*.log
+.claude/
+design-system/
+playwright-report/
+test-results/
+hackathon-teamup-plan.md
+CLAUDE.md
+DECISIONS.md

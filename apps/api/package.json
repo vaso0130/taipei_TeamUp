@@ -1,0 +1,38 @@
+{
+  "name": "@teamup/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "esbuild src/server.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/server.cjs --external:pg-native --log-level=warning",
+    "start": "node dist/server.cjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "seed": "tsx src/seed/run.ts",
+    "eval:moderation": "tsx scripts/eval-moderation.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.0",
+    "@teamup/shared": "workspace:*",
+    "dotenv": "^17.4.2",
+    "drizzle-orm": "^0.44.0",
+    "google-auth-library": "^11.0.2",
+    "hono": "^4.6.0",
+    "jose": "^6.2.10",
+    "pg": "^8.13.0",
+    "uuidv7": "^1.0.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.11.0",
+    "drizzle-kit": "^0.31.0",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.3",
+    "vitest": "^3.0.0"
+  }
+}

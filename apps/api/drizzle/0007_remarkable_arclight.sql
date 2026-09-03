@@ -1,0 +1,1 @@
+ALTER TABLE "moderation_records" ADD COLUMN "flagged" boolean DEFAULT false NOT NULL;

@@ -1,0 +1,31 @@
+{
+  "event": {
+    "slug": "weekend-bookclub",
+    "name": "週末讀書會（示範活動）",
+    "description": "示範用活動：證明本平台換一份 seed 檔就能承載規則完全不同的活動——3 至 6 人成會、同一人可加入多個讀書會、不需指定聯絡人、不需成年確認。",
+    "startsAt": "2026-10-03T14:00:00+08:00",
+    "endsAt": "2026-12-26T17:00:00+08:00",
+    "recruitClosesAt": "2026-12-19T23:59:59+08:00",
+    "minMembers": 3,
+    "maxMembers": 6,
+    "exclusiveMembership": false,
+    "requiredContacts": 0,
+    "requiresAdultCheck": false,
+    "termTeam": "讀書會",
+    "termMember": "書友",
+    "status": "open",
+    "retentionDays": 30
+  },
+  "roles": [
+    { "key": "host", "label": "導讀人", "sortOrder": 1 },
+    { "key": "facilitator", "label": "場地與時間協調", "sortOrder": 2 },
+    { "key": "note_taker", "label": "筆記手", "sortOrder": 3 }
+  ],
+  "skills": [
+    { "key": "fiction", "label": "文學小說", "category": "想讀的主題", "sortOrder": 1 },
+    { "key": "history", "label": "歷史", "category": "想讀的主題", "sortOrder": 2 },
+    { "key": "technology", "label": "科技與程式", "category": "想讀的主題", "sortOrder": 3 },
+    { "key": "philosophy", "label": "哲學", "category": "想讀的主題", "sortOrder": 4 },
+    { "key": "social_science", "label": "社會科學", "category": "想讀的主題", "sortOrder": 5 }
+  ]
+}
