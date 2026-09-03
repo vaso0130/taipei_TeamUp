@@ -29,10 +29,38 @@
   --font-brand: 'LXGW WenKai TC', 'Noto Sans TC', serif;
 }
 
+/*
+ * Night palette — the same signage system after dark: ink ground,
+ * brighter teal for contrast, hover shades flip lighter. Applied by
+ * toggling .dark on <html> (the toggle in the header; the first press
+ * is a prank — see RealDarkMode.vue).
+ */
+:root.dark {
+  color-scheme: dark;
+  --color-paper: #101816;
+  --color-ink: #e4eeea;
+  --color-primary: #2aa38d;
+  --color-primary-deep: #4fc2ab;
+  --color-primary-mist: #17332d;
+  --color-cta: #ea7c3c;
+  --color-cta-deep: #f59e6b;
+  --color-line: #2a3a36;
+  --color-card: #172220;
+  --color-mist: #1d2a27;
+  --color-dim: #8fa39d;
+  --color-ok: #58c072;
+  --color-ok-mist: #16301f;
+  --color-warn: #dcb14e;
+  --color-warn-mist: #322910;
+  --color-danger: #f07575;
+  --color-danger-mist: #3a1c1c;
+}
+
 body {
   background-color: var(--color-paper);
   color: var(--color-ink);
   font-family: var(--font-sans);
+  transition: background-color 300ms ease, color 300ms ease;
 }
 
 :focus-visible {

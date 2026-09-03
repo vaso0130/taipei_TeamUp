@@ -8,28 +8,79 @@ import { useEventStore } from './stores/event.js'
 const eventStore = useEventStore()
 const auth = useAuthStore()
 
-// ---- easter egg: 真・深色模式（連點品牌圓標 5 下） ----
-const realDark = ref(false)
-const darkToast = ref(false)
+// ---- dark mode toggle（第一次按是陷阱） ----
+const realDark = ref(false) // the flashlight prank overlay
+const isDark = ref(false) // the actual dark theme
+const darkToast = ref('')
 let brandClicks: number[] = []
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 
+function applyTheme(dark: boolean) {
+  isDark.value = dark
+  document.documentElement.classList.toggle('dark', dark)
+  try {
+    localStorage.setItem('tpe-theme', dark ? 'dark' : 'light')
+  } catch {
+    /* private mode etc. — theme just won't persist */
+  }
+}
+
+function showToast(text: string, ms?: number) {
+  darkToast.value = text
+  clearTimeout(toastTimer)
+  if (ms) toastTimer = setTimeout(() => (darkToast.value = ''), ms)
+}
+
+function alreadyPranked(): boolean {
+  try {
+    return localStorage.getItem('tpe-dark-pranked') === '1'
+  } catch {
+    return true
+  }
+}
+
+function toggleDark() {
+  if (realDark.value) {
+    // Second press: lights back on, deliver the real thing.
+    realDark.value = false
+    applyTheme(true)
+    showToast('好啦，這才是你要的深色模式 🌙', 3500)
+    return
+  }
+  if (isDark.value) {
+    applyTheme(false)
+    showToast('')
+    return
+  }
+  if (!alreadyPranked()) {
+    // First press ever: real darkness. Physically.
+    try {
+      localStorage.setItem('tpe-dark-pranked', '1')
+    } catch {
+      /* fine — they'll just get pranked again next visit */
+    }
+    realDark.value = true
+    showToast('🔦 已啟用真・深色模式（物理）。想要普通的？再按一次。')
+    return
+  }
+  applyTheme(true)
+}
+
+/** Hidden encore: five quick clicks on the roundel summon the flashlight anytime. */
 function onBrandClick() {
   const now = Date.now()
   brandClicks = [...brandClicks.filter((t) => now - t < 3000), now]
   if (brandClicks.length >= 5) {
     brandClicks = []
     realDark.value = !realDark.value
-    darkToast.value = realDark.value
-    clearTimeout(toastTimer)
-    if (realDark.value) toastTimer = setTimeout(() => (darkToast.value = false), 5000)
+    showToast(realDark.value ? '🔦 真・深色模式——按 Esc 開燈' : '', 5000)
   }
 }
 
 function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape' && realDark.value) {
     realDark.value = false
-    darkToast.value = false
+    showToast('')
   }
 }
 
@@ -37,6 +88,11 @@ onMounted(() => {
   auth.init()
   void eventStore.ensureLoaded()
   window.addEventListener('keydown', onKeydown)
+  try {
+    if (localStorage.getItem('tpe-theme') === 'dark') applyTheme(true)
+  } catch {
+    /* default light */
+  }
 })
 onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
@@ -84,6 +140,15 @@ const navItems = [
           >
             審核
           </RouterLink>
+          <button
+            class="btn btn-quiet !min-h-[40px] !px-3 text-base"
+            :aria-pressed="isDark"
+            :aria-label="isDark ? '切換為淺色模式' : '切換為深色模式'"
+            :title="isDark ? '切換為淺色模式' : '切換為深色模式'"
+            @click="toggleDark"
+          >
+            {{ realDark ? '🔦' : isDark ? '🌙' : '☀️' }}
+          </button>
           <RouterLink
             to="/profile"
             class="btn btn-quiet ml-1 !min-h-[40px] !px-3 text-sm"
@@ -103,10 +168,10 @@ const navItems = [
     <Transition name="fade">
       <p
         v-if="darkToast"
-        class="fixed bottom-6 left-1/2 z-[1000] -translate-x-1/2 rounded-full bg-black/80 px-4 py-2 text-sm text-white shadow-lg"
+        class="fixed bottom-6 left-1/2 z-[1000] w-max max-w-[90vw] -translate-x-1/2 rounded-full bg-black/80 px-4 py-2 text-center text-sm text-white shadow-lg"
         role="status"
       >
-        🔦 真・深色模式——按 Esc 或再連點圓標 5 下開燈
+        {{ darkToast }}
       </p>
     </Transition>
 
