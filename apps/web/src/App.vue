@@ -66,10 +66,18 @@ function toggleDark() {
   applyTheme(true)
 }
 
-/** Hidden encore: five quick clicks on the roundel summon the flashlight anytime. */
+/**
+ * Hidden encore: five quick clicks on the roundel summon the
+ * flashlight anytime. The roundel wobbles on every click and mutters
+ * at three and four — curiosity does the rest.
+ */
+const brandWobble = ref(0)
 function onBrandClick() {
   const now = Date.now()
   brandClicks = [...brandClicks.filter((t) => now - t < 3000), now]
+  brandWobble.value++
+  if (brandClicks.length === 3) showToast('？', 1500)
+  if (brandClicks.length === 4) showToast('再一下就要停電了…', 2000)
   if (brandClicks.length >= 5) {
     brandClicks = []
     realDark.value = !realDark.value
@@ -108,10 +116,18 @@ const navItems = [
   <div class="flex min-h-screen flex-col">
     <header class="border-b border-line bg-card">
       <div class="mx-auto flex max-w-5xl items-center justify-between gap-4 px-4 py-3">
-        <RouterLink to="/" class="flex items-center gap-2.5" aria-label="回到首頁" @click="onBrandClick">
+        <RouterLink
+          to="/"
+          class="flex items-center gap-2.5"
+          aria-label="回到首頁"
+          title="請勿連點五下"
+          @click="onBrandClick"
+        >
           <!-- brand roundel: the 配 character as a station mark -->
           <span
+            :key="brandWobble"
             class="flex h-9 w-9 items-center justify-center rounded-full bg-primary font-brand text-lg font-bold text-white"
+            :class="{ 'brand-wobble': brandWobble > 0 }"
             aria-hidden="true"
           >
             配
@@ -205,5 +221,21 @@ const navItems = [
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+
+/* Re-triggered on every click via :key bump. */
+.brand-wobble {
+  animation: brand-wobble 0.35s ease;
+}
+@keyframes brand-wobble {
+  25% {
+    transform: rotate(-12deg) scale(1.08);
+  }
+  60% {
+    transform: rotate(9deg) scale(1.04);
+  }
+  100% {
+    transform: rotate(0) scale(1);
+  }
 }
 </style>
