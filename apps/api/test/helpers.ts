@@ -42,7 +42,6 @@ export function buildTestApp(
     nameModerator?: Moderator
     adminEmails?: string[]
     taskSecret?: string
-    hopFetcher?: import('../src/tools/url-expander.js').HopFetcher
     captcha?: import('../src/security/captcha.js').CaptchaVerifier
   } = {},
 ) {
@@ -164,7 +163,6 @@ export function buildTestApp(
       : {}),
     ...(opts.taskSecret ? { taskSecret: opts.taskSecret } : {}),
     ...(opts.captcha ? { captcha: opts.captcha } : {}),
-    ...(opts.hopFetcher ? { hopFetcher: opts.hopFetcher } : {}),
   })
   return {
     app,

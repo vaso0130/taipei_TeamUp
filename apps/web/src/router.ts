@@ -19,7 +19,6 @@ export const router = createRouter({
     },
     { path: '/profile', name: 'profile', component: () => import('./pages/ProfilePage.vue') },
     { path: '/admin', name: 'admin', component: () => import('./pages/AdminPage.vue') },
-    { path: '/check', name: 'check', component: () => import('./pages/CheckPage.vue') },
     { path: '/privacy', name: 'privacy', component: () => import('./pages/PrivacyPage.vue') },
     { path: '/terms', name: 'terms', component: () => import('./pages/TermsPage.vue') },
   ],

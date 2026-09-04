@@ -197,7 +197,6 @@ const navItems = [
       >
         <p>本平台為開源專案（MIT），僅協助組隊媒合，不代為報名活動。</p>
         <nav class="flex gap-4" aria-label="政策連結">
-          <RouterLink to="/check" class="hover:text-ink">短網址查核</RouterLink>
           <RouterLink to="/privacy" class="hover:text-ink">隱私權政策</RouterLink>
           <RouterLink to="/terms" class="hover:text-ink">服務條款</RouterLink>
           <a
