@@ -7,6 +7,7 @@ import {
   ApplySchema,
   ContactsSchema,
   CreateTeamSchema,
+  ExpandUrlSchema,
   InviteSchema,
   ModerationTaskSchema,
   ParticipationInputSchema,
@@ -29,6 +30,7 @@ import { SlidingWindowLimiter } from './http/rate-limit.js'
 import { MessagingError, type MessagingService } from './messaging/service.js'
 import type { ModerationService } from './moderation/service.js'
 import { ContentReportError, type ContentReportService } from './reports/content-service.js'
+import { expandUrl, type HopFetcher } from './tools/url-expander.js'
 import { ParticipationError, type ParticipationService } from './participants/service.js'
 import type { CaptchaVerifier } from './security/captcha.js'
 import { TeamError, type TeamService } from './teams/service.js'
@@ -66,6 +68,8 @@ export interface AppDeps {
    * no CORS headers (same-origin deployments and local dev proxy).
    */
   allowedOrigins?: string[]
+  /** Test injection for the URL-expander tool's per-hop requester. */
+  hopFetcher?: HopFetcher
 }
 
 interface AppEnv {
@@ -336,6 +340,21 @@ export function createApp(deps: AppDeps) {
     } catch (err) {
       return domainError(c, err)
     }
+  })
+
+  // ---- public anti-scam tool: short-URL expansion (no login) ----
+
+  const urlCheckLimiter = new SlidingWindowLimiter(30, 60 * 60 * 1000)
+
+  app.post('/api/tools/expand-url', async (c) => {
+    // Keyed by client IP — the tool is open to the public by design.
+    const ip = (c.req.header('x-forwarded-for') ?? '').split(',')[0]!.trim() || 'unknown'
+    if (!urlCheckLimiter.allow(`urlcheck:${ip}`)) {
+      return c.json({ error: 'rate_limited', message: '查詢太頻繁，請稍後再試' }, 429)
+    }
+    const body = await parseBody(c, ExpandUrlSchema)
+    if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
+    return c.json(await expandUrl(body.data.url, deps.hopFetcher))
   })
 
   // ---- teams ----

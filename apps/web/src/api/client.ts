@@ -11,6 +11,7 @@ import type {
   PendingModerationItem,
   CreateTeamInput,
   EventDetail,
+  ExpandUrlResult,
   EventSummary,
   MeView,
   MessageView,
@@ -238,6 +239,9 @@ export const api = {
       token,
       body: { reason },
     }),
+  /** Public anti-scam tool — no login needed. */
+  expandUrl: (url: string) =>
+    request<ExpandUrlResult>('/api/tools/expand-url', { method: 'POST', body: { url } }),
   reportParticipant: (token: string, eventSlug: string, userId: string, reason: string) =>
     request<{ reported: boolean }>(
       `/api/events/${encodeURIComponent(eventSlug)}/participants/${encodeURIComponent(userId)}/report`,
