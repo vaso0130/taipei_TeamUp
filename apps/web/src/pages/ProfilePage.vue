@@ -54,10 +54,15 @@ async function deleteAccount() {
 // ---- dev login (local development only) ----
 const loginEmail = ref('')
 const isDevBuild = import.meta.env.DEV
-/** Firebase's sign-in links come from noreply@<authDomain>. */
-const mailSender = import.meta.env.VITE_FIREBASE_AUTH_DOMAIN
-  ? `noreply@${import.meta.env.VITE_FIREBASE_AUTH_DOMAIN}`
-  : ''
+/**
+ * Sign-in links come from noreply@<authDomain> by default; a verified
+ * custom sending domain overrides it via VITE_MAIL_SENDER.
+ */
+const mailSender =
+  import.meta.env.VITE_MAIL_SENDER ||
+  (import.meta.env.VITE_FIREBASE_AUTH_DOMAIN
+    ? `noreply@${import.meta.env.VITE_FIREBASE_AUTH_DOMAIN}`
+    : '')
 
 // ---- display name ----
 const displayName = ref('')
