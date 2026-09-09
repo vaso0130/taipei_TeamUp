@@ -61,12 +61,16 @@ pnpm seed                                 # 匯入活動 seed
 
 ## 換一場活動
 
-活動設定在 `apps/api/seeds/events/*.json`，一個檔案一場活動：人數規則、是否一人限一團、需要幾位聯絡人、角色字典、技能字典、UI 術語（「隊伍／成員」可覆寫成「讀書會／書友」）。新增一個 JSON 檔、跑 `pnpm seed`，就是一場新活動。repo 內附兩個範例：
+兩種方式，資料完全相同、驗證走同一套 schema：
+
+**後台表單（建議）**：管理員登入後到「審核 → 活動管理」（`/admin/events`），從範本、複製既有活動或空白開始，填人數規則、時程、聯絡人數、角色與技能字典、UI 術語（「隊伍／成員」可覆寫成「讀書會／書友」），右側即時預覽參加者會看到的首頁。存成草稿對外不可見，「開放」前系統會檢查漏填的項目。設計規格見 [`docs/design/admin-events.md`](docs/design/admin-events.md)。
+
+**seed JSON（備份、CI、初始化）**：`apps/api/seeds/events/*.json` 一個檔案一場活動，跑 `pnpm seed` 匯入；後台的「匯出 JSON」產出的就是這個格式。repo 內附兩個範例，也是後台的內建範本：
 
 - `codefest-2026-fall.json` — 黑客松（4–5 人、一人一隊、需 2 位聯絡人）
 - `weekend-bookclub.json` — 讀書會（3–6 人、不限團數、免聯絡人）——證明通用性的示範活動
 
-多場活動同時開放與「後台表單建立活動、不用寫 JSON」是下一個里程碑（M7），設計草稿與任務拆解見 [`docs/roadmap.md`](docs/roadmap.md)。
+多場活動同時開放（首頁活動選擇、`/e/:slug` 路徑）是 M7 的下一步，見 [`docs/roadmap.md`](docs/roadmap.md)。
 
 ## 架構
 

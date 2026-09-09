@@ -1,6 +1,6 @@
 # Roadmap：M7 多活動與活動管理
 
-狀態：**草稿，待確認範圍**（2026-09-09）。對應 ADR-035（草稿）。
+狀態（2026-09-09）：**B 活動管理已上線**（任務 2、3、4、7 完成，設計規格見 `docs/design/admin-events.md`）；**A 前端活動層待確認範圍**（任務 5、6、8、9）。對應 ADR-035。
 
 ## 為什麼
 
@@ -51,13 +51,13 @@
 
 | # | 任務 | 範圍 | 估時 | 依賴 |
 |---|---|---|---|---|
-| 1 | ADR-035 定稿（本文件確認後搬進 DECISIONS.md） | docs | 0.5h | — |
-| 2 | shared：`EVENT_STATUSES` 加 `draft`；`AdminEventInput` schema（含字典）；key 產生器與測試 | packages/shared | 2h | 1 |
-| 3 | api：`EventAdminService`（建立／更新／複製／匯出、護欄、audit）＋ `DbEventRepository` 寫入方法（抽自 seed upsert）＋ migration（draft） | apps/api | 1d | 2 |
-| 4 | api：`GET /api/events` 只列 open／closed；admin 路由與 zod；非管理員 403、護欄、匯出 round-trip（匯出→seed schema 驗證）測試 | apps/api | 0.5d | 3 |
+| 1 | ADR-035 定稿（B 部分已定案，A 部分待確認） | docs | 0.5h | — |
+| 2 ✅ | shared：admin events schema／型別／錯誤碼；`draft`／`archived` 狀態原本就在，無需 migration | packages/shared | 2h | 1 |
+| 3 ✅ | api：`EventAdminService`（建立／更新／狀態／複製／匯出／刪除、護欄、audit）＋ `DbEventAdminRepository`；seed CLI 與後台共用 `seed/upsert.ts` | apps/api | 1d | 2 |
+| 4 ✅ | api：`GET /api/events` 只列 open／closed；admin 路由與 zod；24 個路由測試（403、護欄、狀態矩陣、匯出 round-trip） | apps/api | 0.5d | 3 |
 | 5 | web：router 改 `/e/:slug/*` ＋舊路徑 302 守衛；event store 多活動快取；首頁活動選擇 | apps/web | 1d | — |
 | 6 | web：個人檔案多活動參加資料；訊息頁活動標示；後台活動切換器 | apps/web | 0.5d | 5 |
-| 7 | web：後台「活動」頁籤（列表、表單、字典表格編輯、複製、匯出 JSON） | apps/web | 1.5d | 4, 6 |
+| 7 ✅ | web：`/admin/events`（列表、起點選擇、三欄編輯器、字典編輯、狀態卡、匯出 JSON）；已在正式站以 Chrome 走完「範本→草稿→開放→編輯→關閉→封存」 | apps/web | 1.5d | 4 |
 | 8 | e2e 與 Playwright 快照更新；README「換一場活動」改寫成「後台建立活動；JSON 為進階／備份用」；docs/architecture.md 路徑表 | e2e, docs | 0.5d | 5, 7 |
 | 9 | 部署：Hosting 不需重建（不再依賴 `VITE_EVENT_SLUG`）；API 一次部署＋migration；場測驗證 | infra | 0.5d | 8 |
 
