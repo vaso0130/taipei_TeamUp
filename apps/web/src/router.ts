@@ -15,6 +15,8 @@ declare module 'vue-router' {
     eventLayer?: boolean
     /** Editor-style page: wider main column. */
     wide?: boolean
+    /** Landing board: no page column or padding — the page paints edge to edge. */
+    fullBleed?: boolean
   }
 }
 
@@ -39,7 +41,7 @@ async function redirectLegacy(to: RouteLocationNormalized): Promise<RouteLocatio
     ENV_EVENT_SLUG ? null : await eventStore.ensureSummaries(),
   )
   if (slug) return { path: legacyRedirectPath(slug, to.path), query: to.query }
-  return { name: 'home', query: { next: to.fullPath } }
+  return { name: 'events', query: { next: to.fullPath } }
 }
 
 const legacyRoutes: RouteRecordRaw[] = ['/teams', '/teams/:id', '/people', '/applications'].map(
@@ -54,7 +56,13 @@ const legacyRoutes: RouteRecordRaw[] = ['/teams', '/teams/:id', '/people', '/app
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/', name: 'home', component: () => import('./pages/LandingPage.vue') },
+    {
+      path: '/',
+      name: 'home',
+      component: () => import('./pages/LandingPage.vue'),
+      meta: { fullBleed: true },
+    },
+    { path: '/events', name: 'events', component: () => import('./pages/EventsPage.vue') },
     {
       path: '/e/:slug',
       name: 'event-home',

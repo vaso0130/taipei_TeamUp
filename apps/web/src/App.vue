@@ -170,7 +170,7 @@ const navItems = computed(() => {
         { key: 'people', to: { name: 'people', params: { slug: s } }, label: '找人' },
         { key: 'applications', to: { name: 'applications', params: { slug: s } }, label: '申請' },
       ]
-    : [{ key: 'events', to: { name: 'home' }, label: '活動' }]
+    : [{ key: 'events', to: { name: 'events' }, label: '活動' }]
   return [...eventNav, { key: 'messages', to: { name: 'messages' }, label: '訊息' }]
 })
 </script>
@@ -328,7 +328,16 @@ const navItems = computed(() => {
     </div>
 
     <!-- Editor-style pages (route meta `wide`) get a three-column-friendly width. -->
-    <main class="mx-auto w-full flex-1 px-4 py-8" :class="route.meta.wide ? 'max-w-7xl' : 'max-w-5xl'">
+    <main
+      class="mx-auto w-full flex-1"
+      :class="
+        route.meta.fullBleed
+          ? 'max-w-none'
+          : route.meta.wide
+            ? 'max-w-7xl px-4 py-8'
+            : 'max-w-5xl px-4 py-8'
+      "
+    >
       <div
         v-if="auth.sessionExpired"
         class="card mb-6 flex flex-wrap items-center justify-between gap-3 bg-warn-mist px-5 py-4 text-sm"

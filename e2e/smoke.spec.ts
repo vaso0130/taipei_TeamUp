@@ -118,6 +118,14 @@ test('keyboard focus is visible on interactive elements', async ({ page }) => {
   await expect(focused).toBeVisible()
 })
 
+test('landing board leads to the event list', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByRole('heading', { level: 1 })).toContainText('臺北配')
+  await page.getByRole('link', { name: /看看進行中的活動/ }).click()
+  await expect(page).toHaveURL(/\/events$/)
+  await expect(page.getByRole('heading', { level: 1 })).toContainText('進行中的活動')
+})
+
 test('unknown routes render the 404 page with a way back', async ({ page }) => {
   await page.goto('/nonexistent')
   await expect(page.getByRole('heading', { level: 1 })).toContainText('找不到這個頁面')

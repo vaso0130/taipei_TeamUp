@@ -6,19 +6,9 @@
  * line is simply there. Colours are fixed on the ink board, independent of
  * the site theme — see the scoped tokens below.
  */
-const LINES = ['正在找神隊友嗎？', '你來對地方了。', '快來看看誰正在等你來組隊']
+import { RouterLink } from 'vue-router'
 
-function onCta(e: MouseEvent) {
-  const target = document.getElementById('events')
-  if (!target) return // let the browser follow the hash
-  e.preventDefault()
-  const reduced =
-    typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
-  target.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' })
-  // Move focus with the view so keyboard users continue from the list.
-  target.focus({ preventScroll: true })
-  history.replaceState(history.state, '', '#events')
-}
+const LINES = ['正在找神隊友嗎？', '你來對地方了。', '快來看看誰正在等你來組隊']
 </script>
 
 <template>
@@ -47,7 +37,7 @@ function onCta(e: MouseEvent) {
     </h1>
 
     <p class="hero-cta-row">
-      <a href="#events" class="btn hero-cta" @click="onCta">
+      <RouterLink :to="{ name: 'events' }" class="btn hero-cta">
         看看進行中的活動
         <svg
           class="h-4 w-4"
@@ -59,9 +49,9 @@ function onCta(e: MouseEvent) {
           stroke-linejoin="round"
           aria-hidden="true"
         >
-          <path d="M12 5v14M5 12l7 7 7-7" />
+          <path d="M5 12h14M13 5l7 7-7 7" />
         </svg>
-      </a>
+      </RouterLink>
     </p>
   </div>
 </template>
