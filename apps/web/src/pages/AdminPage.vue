@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import type {
   AdminStats,
@@ -132,6 +132,14 @@ onMounted(async () => {
   await eventStore.ensureLoaded()
   await load()
 })
+// On a hard reload the Firebase session is restored after mount; without
+// this the dashboard would sit on empty counters until "重新整理".
+watch(
+  () => auth.isLoggedIn,
+  (loggedIn) => {
+    if (loggedIn) void load()
+  },
+)
 
 async function decide(item: PendingModerationItem, action: 'approve' | 'block') {
   if (!auth.token) return

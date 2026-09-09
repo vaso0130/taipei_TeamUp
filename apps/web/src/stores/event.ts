@@ -3,6 +3,9 @@ import type { DictionaryOption, EventDetail } from '@teamup/shared'
 import { api } from '../api/client.js'
 import { dotColorForIndex } from '../lib/colors.js'
 
+/** Single in-flight load shared by every caller of ensureLoaded(). */
+let inflight: Promise<void> | null = null
+
 interface EventState {
   detail: EventDetail | null
   loading: boolean
@@ -76,8 +79,19 @@ export const useEventStore = defineStore('event', {
         this.loading = false
       }
     },
+    /**
+     * Await the event configuration, sharing one in-flight request:
+     * App.vue starts loading on mount and pages call this right after, so
+     * a "loading, skip" shortcut would hand pages an empty store.
+     */
     async ensureLoaded() {
-      if (!this.detail && !this.loading) await this.load()
+      if (this.detail) return
+      if (!inflight) {
+        inflight = this.load().finally(() => {
+          inflight = null
+        })
+      }
+      await inflight
     },
   },
 })
