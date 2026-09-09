@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import type {
+  AdminReportItem,
   AdminStats,
   AdminTeamItem,
   AdminThreadDetail,
@@ -20,9 +21,11 @@ import { useEventStore } from '../stores/event.js'
 const auth = useAuthStore()
 const eventStore = useEventStore()
 
-const tab = ref<'stats' | 'users' | 'teams' | 'pending' | 'risk'>('stats')
+const tab = ref<'stats' | 'users' | 'teams' | 'pending' | 'risk' | 'reports'>('stats')
 const items = ref<PendingModerationItem[]>([])
 const riskItems = ref<RiskMessageItem[]>([])
+const reports = ref<AdminReportItem[]>([])
+const reportStatusFilter = ref<'all' | 'open' | 'resolved'>('all')
 const stats = ref<AdminStats | null>(null)
 const users = ref<AdminUserItem[]>([])
 const teams = ref<AdminTeamItem[]>([])
@@ -47,13 +50,33 @@ const unprocessedRiskCount = computed(
   () => riskItems.value.filter((item) => !item.decidedBy.startsWith('human')).length,
 )
 
+const visibleReports = computed(() =>
+  reportStatusFilter.value === 'all'
+    ? reports.value
+    : reports.value.filter((r) => r.status === reportStatusFilter.value),
+)
+const openReportCount = computed(() => reports.value.filter((r) => r.status === 'open').length)
+
 const TABS = computed(() => [
   { key: 'stats' as const, label: '平台總覽' },
   { key: 'users' as const, label: `帳號（${users.value.length}）` },
   { key: 'teams' as const, label: `${eventStore.termTeam}（${teams.value.length}）` },
   { key: 'pending' as const, label: `待人工審核（${items.value.length}）` },
   { key: 'risk' as const, label: `風險訊息（${unprocessedRiskCount.value}）` },
+  { key: 'reports' as const, label: `檢舉紀錄（${reports.value.length}）` },
 ])
+
+// Report log vocabulary: the team term is event data, the rest is platform copy.
+const REPORT_KIND_LABEL = computed<Record<string, string>>(() => ({
+  message: '訊息',
+  team: eventStore.termTeam,
+  participant: '參加者',
+}))
+const REPORT_STATUS_LABEL: Record<string, string> = { open: '處理中', resolved: '已結案' }
+const REPORT_STATUS_CLASS: Record<string, string> = {
+  open: 'bg-warn-mist text-warn',
+  resolved: 'bg-mist text-dim',
+}
 
 const USER_STATUS_LABEL: Record<string, string> = {
   active: '正常',
@@ -105,18 +128,20 @@ async function load() {
   forbidden.value = false
   try {
     const slug = eventStore.event?.slug
-    const [pending, risk, overview, roster, teamList] = await Promise.all([
+    const [pending, risk, overview, roster, teamList, reportLog] = await Promise.all([
       api.adminListPending(auth.getToken),
       api.adminListRisk(auth.getToken),
       slug ? api.adminStats(auth.getToken, slug) : Promise.resolve(null),
       slug ? api.adminListUsers(auth.getToken, slug) : Promise.resolve({ items: [] }),
       slug ? api.adminListTeams(auth.getToken, slug) : Promise.resolve({ items: [] }),
+      api.adminListReports(auth.getToken, slug),
     ])
     items.value = pending.items
     riskItems.value = risk.items
     stats.value = overview
     users.value = roster.items
     teams.value = teamList.items
+    reports.value = reportLog.items
   } catch (err) {
     if (err instanceof ApiError && (err.status === 403 || err.status === 401)) {
       forbidden.value = true
@@ -463,6 +488,66 @@ async function disbandTeam(team: AdminTeamItem) {
           </li>
         </ul>
         <EmptyState v-else-if="!loading" class="mt-6" title="沒有等待人工審核的內容" hint="佇列是空的，太平盛世。" />
+      </template>
+
+      <!-- 檢舉紀錄（僅中繼資料：不含被檢舉內容、不含 Email） -->
+      <template v-else-if="tab === 'reports'">
+        <div class="mt-4 flex flex-wrap items-center justify-between gap-3">
+          <p class="text-sm text-dim">
+            所有使用者送出的檢舉（訊息、{{ eventStore.termTeam }}、參加者），含複審結果——即使已自動結案復原也會留在這裡。只列原因與判定，不含被檢舉的內容。
+          </p>
+          <div class="flex flex-wrap gap-1" role="group" aria-label="篩選檢舉狀態">
+            <button
+              v-for="s in (['all', 'open', 'resolved'] as const)"
+              :key="s"
+              class="btn !min-h-[32px] text-xs"
+              :class="reportStatusFilter === s ? 'btn-primary' : 'btn-quiet'"
+              :aria-pressed="reportStatusFilter === s"
+              @click="reportStatusFilter = s"
+            >
+              {{ s === 'all' ? '全部' : REPORT_STATUS_LABEL[s] }}
+              <span v-if="s === 'open' && openReportCount > 0">（{{ openReportCount }}）</span>
+            </button>
+          </div>
+        </div>
+        <ul v-if="visibleReports.length" class="mt-4 space-y-2">
+          <li
+            v-for="r in visibleReports"
+            :key="r.id"
+            class="card flex flex-wrap items-center gap-x-3 gap-y-2 p-4 text-sm"
+          >
+            <span class="font-mono text-[11px] text-dim">{{ formatDateTime(r.createdAt) }}</span>
+            <span class="rounded-full bg-mist px-2.5 py-0.5 text-xs text-dim">
+              {{ REPORT_KIND_LABEL[r.kind] ?? r.kind }}
+            </span>
+            <span class="rounded-full bg-danger-mist px-2.5 py-0.5 text-xs text-danger">
+              {{ REASON_LABEL[r.reason] ?? r.reason }}
+            </span>
+            <span class="rounded-full px-2.5 py-0.5 text-xs" :class="REPORT_STATUS_CLASS[r.status]">
+              {{ REPORT_STATUS_LABEL[r.status] ?? r.status }}
+            </span>
+            <span
+              v-if="r.verdict"
+              class="rounded-full px-2.5 py-0.5 text-xs"
+              :class="RISK_CLASS[r.verdict.riskLevel]"
+            >
+              {{ r.verdict.decidedBy === 'human' ? '人工' : 'AI' }}判定：{{ RISK_LABEL[r.verdict.riskLevel] }}
+            </span>
+            <span v-else class="text-xs text-dim">（尚無判定）</span>
+            <span class="text-dim">
+              檢舉人：{{ r.reporterDisplayName ?? '（帳號已刪除）' }}
+            </span>
+            <span class="text-dim">
+              對象：{{ r.targetDisplayName ?? (r.kind === 'team' ? `（${eventStore.termTeam}已刪除）` : '（帳號已刪除）') }}
+            </span>
+          </li>
+        </ul>
+        <EmptyState
+          v-else-if="!loading"
+          class="mt-6"
+          :title="reportStatusFilter === 'all' ? '還沒有任何檢舉' : reportStatusFilter === 'open' ? '沒有處理中的檢舉' : '沒有已結案的檢舉'"
+          hint="使用者送出的檢舉會即時出現在這裡。"
+        />
       </template>
 
       <!-- 風險訊息總覽 -->

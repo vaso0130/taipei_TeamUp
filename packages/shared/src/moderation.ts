@@ -150,6 +150,48 @@ export interface AdminTeamItem {
   createdAt: string
 }
 
+/** Admin report log query (`GET /api/admin/reports`). */
+export const AdminReportsQuerySchema = z.object({
+  /** Event slug; absent → every event. */
+  event: z.string().min(1).max(100).optional(),
+  status: z.enum(['open', 'resolved', 'all']).default('all'),
+  limit: z.coerce.number().int().min(1).max(500).default(200),
+})
+export type AdminReportsQuery = z.infer<typeof AdminReportsQuerySchema>
+
+/** What kind of public content a report was filed against. */
+export type AdminReportKind = 'message' | 'team' | 'participant'
+
+/**
+ * Admin report log row — metadata only, by design (ADR-034): reason
+ * enum, status, latest verdict and display names. Never the reported
+ * text, never emails; content stays behind the audited queue/thread
+ * views.
+ */
+export interface AdminReportItem {
+  id: string
+  kind: AdminReportKind
+  /** Moderation content type the verdict is recorded under (message / team_pitch / participant_blurb). */
+  targetType: 'message' | 'team_pitch' | 'participant_blurb'
+  /** Message id, team id, or `eventSlug/userId` for a participant. */
+  targetId: string
+  /** null when the target is gone and the event can no longer be derived. */
+  eventSlug: string | null
+  reason: string
+  status: 'open' | 'resolved'
+  createdAt: string
+  /** Latest verdict on the target; null when it has never been reviewed. */
+  verdict: {
+    riskLevel: 'low' | 'medium' | 'high'
+    decidedBy: 'auto' | 'human'
+    decidedAt: string
+  } | null
+  /** null when the reporter's account has been deleted. */
+  reporterDisplayName: string | null
+  /** Team name / author nickname; null when the target or account is gone. */
+  targetDisplayName: string | null
+}
+
 /** A user's moderation history (strike view). */
 export interface UserModerationHistory {
   userId: string

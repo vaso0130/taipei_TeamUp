@@ -3,7 +3,7 @@ import type { ReportReason } from '@teamup/shared'
 import type { Db } from '../db/client.js'
 import { isUniqueViolation } from '../db/pg-errors.js'
 import { messageReports } from '../db/schema.js'
-import type { ReportRecord, ReportRepository } from './repository.js'
+import type { ReportListFilter, ReportRecord, ReportRepository } from './repository.js'
 
 type ReportRow = typeof messageReports.$inferSelect
 
@@ -70,6 +70,16 @@ export class DbReportRepository implements ReportRepository {
       .select()
       .from(messageReports)
       .orderBy(desc(messageReports.createdAt))
+    return rows.map(toRecord)
+  }
+
+  async listRecent(filter: ReportListFilter): Promise<ReportRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(messageReports)
+      .where(filter.status ? eq(messageReports.status, filter.status) : undefined)
+      .orderBy(desc(messageReports.createdAt))
+      .limit(filter.limit)
     return rows.map(toRecord)
   }
 

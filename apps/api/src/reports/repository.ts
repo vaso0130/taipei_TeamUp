@@ -10,6 +10,13 @@ export interface ReportRecord {
   createdAt: string
 }
 
+/** Admin report log filter (shared by message and content reports). */
+export interface ReportListFilter {
+  /** Absent → both pending and resolved. */
+  status?: 'pending' | 'resolved'
+  limit: number
+}
+
 export interface ReportRepository {
   /** Returns null when this reporter already reported this message. */
   create(record: ReportRecord): Promise<ReportRecord | null>
@@ -21,6 +28,8 @@ export interface ReportRepository {
   resolveForMessage(messageId: string): Promise<void>
   /** Every report, newest first (admin risk overview; field-test scale). */
   listAll(): Promise<ReportRecord[]>
+  /** Newest-first page for the admin report log (ADR-034), optionally by status. */
+  listRecent(filter: ReportListFilter): Promise<ReportRecord[]>
   /** Reports one user filed (their own data export). */
   listByReporter(reporterUserId: string): Promise<ReportRecord[]>
 }
@@ -66,6 +75,16 @@ export class MemoryReportRepository implements ReportRepository {
     return Promise.resolve(
       [...this.records]
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .map((r) => ({ ...r })),
+    )
+  }
+
+  listRecent(filter: ReportListFilter): Promise<ReportRecord[]> {
+    return Promise.resolve(
+      this.records
+        .filter((r) => filter.status === undefined || r.status === filter.status)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .slice(0, filter.limit)
         .map((r) => ({ ...r })),
     )
   }

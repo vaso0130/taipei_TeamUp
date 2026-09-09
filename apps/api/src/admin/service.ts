@@ -1,4 +1,6 @@
 import type {
+  AdminReportItem,
+  AdminReportsQuery,
   AdminTeamItem,
   AdminThreadDetail,
   AdminUserItem,
@@ -13,7 +15,8 @@ import type { FieldCipher } from '../crypto/envelope.js'
 import type { MessageRepository, ThreadRepository } from '../messaging/repository.js'
 import type { ModerationRecord, ModerationRecordRepository } from '../moderation/records.js'
 import type { ParticipantRepository } from '../participants/repository.js'
-import type { ReportRepository } from '../reports/repository.js'
+import type { ContentReportRepository } from '../reports/content-repository.js'
+import type { ReportListFilter, ReportRepository } from '../reports/repository.js'
 import type { TeamRepository } from '../teams/repository.js'
 import type { UserRepository } from '../users/repository.js'
 
@@ -46,6 +49,7 @@ export class AdminService {
       threads?: ThreadRepository
       records?: ModerationRecordRepository
       reports?: ReportRepository
+      contentReports?: ContentReportRepository
     },
   ) {}
 
@@ -224,6 +228,112 @@ export class AdminService {
     }
     items.sort((a, b) => b.decidedAt.localeCompare(a.decidedAt))
     return items.slice(0, 200)
+  }
+
+  /**
+   * Report log (ADR-034): every user report — message, team, participant
+   * — merged newest-first, with its status and the target's latest
+   * verdict. Metadata only: enum reason, display names, risk level.
+   * No reported text and no email ever leaves this method, so (like
+   * listRiskMessages) the read is not audit-logged: nothing is
+   * decrypted and the row set is not personal data beyond nicknames.
+   * Today's gap this closes: a content report re-reviewed as low is
+   * resolved and restored with no trace anywhere else in the backend.
+   */
+  async listReports(query: AdminReportsQuery): Promise<AdminReportItem[]> {
+    const filter: ReportListFilter = {
+      limit: query.limit,
+      ...(query.status === 'open'
+        ? { status: 'pending' as const }
+        : query.status === 'resolved'
+          ? { status: 'resolved' as const }
+          : {}),
+    }
+    const [messageReports, contentReports] = await Promise.all([
+      this.deps.reports?.listRecent(filter) ?? [],
+      this.deps.contentReports?.listRecent(filter) ?? [],
+    ])
+
+    const nameOf = async (userId: string): Promise<string | null> => {
+      const user = await this.deps.users.findById(userId)
+      return user && user.status !== 'deleted' ? user.displayName : null
+    }
+    const verdictFor = async (
+      types: string[],
+      id: string,
+    ): Promise<AdminReportItem['verdict']> => {
+      const record = await this.deps.records?.latestFor(types, id)
+      if (!record) return null
+      return {
+        riskLevel: record.riskLevel,
+        decidedBy: record.decidedBy.startsWith('human') ? 'human' : 'auto',
+        decidedAt: record.createdAt,
+      }
+    }
+    const status = (s: 'pending' | 'resolved'): AdminReportItem['status'] =>
+      s === 'pending' ? 'open' : 'resolved'
+
+    const items: AdminReportItem[] = []
+    for (const r of messageReports) {
+      const message = await this.deps.messages.getById(r.messageId)
+      const thread = message ? await this.deps.threads?.getById(message.threadId) : null
+      items.push({
+        id: r.id,
+        kind: 'message',
+        targetType: 'message',
+        targetId: r.messageId,
+        eventSlug: thread?.eventSlug ?? null,
+        reason: r.reason,
+        status: status(r.status),
+        createdAt: r.createdAt,
+        verdict: await verdictFor(['message', 'reported_message'], r.messageId),
+        reporterDisplayName: await nameOf(r.reporterUserId),
+        targetDisplayName: message ? await nameOf(message.senderId) : null,
+      })
+    }
+    for (const r of contentReports) {
+      if (r.targetType === 'team') {
+        const team = await this.deps.teams.getById(r.targetId)
+        items.push({
+          id: r.id,
+          kind: 'team',
+          targetType: 'team_pitch',
+          targetId: r.targetId,
+          eventSlug: team?.eventSlug ?? null,
+          reason: r.reason,
+          status: status(r.status),
+          createdAt: r.createdAt,
+          verdict: await verdictFor(['team_pitch', 'reported_team_pitch'], r.targetId),
+          reporterDisplayName: await nameOf(r.reporterUserId),
+          targetDisplayName: team?.name ?? null,
+        })
+      } else {
+        // Participant target ids are `eventSlug/userId`; the slug is
+        // derivable even after the participation row is gone.
+        const slash = r.targetId.indexOf('/')
+        const eventSlug = slash > 0 ? r.targetId.slice(0, slash) : null
+        const userId = slash > 0 ? r.targetId.slice(slash + 1) : r.targetId
+        items.push({
+          id: r.id,
+          kind: 'participant',
+          targetType: 'participant_blurb',
+          targetId: r.targetId,
+          eventSlug,
+          reason: r.reason,
+          status: status(r.status),
+          createdAt: r.createdAt,
+          verdict: await verdictFor(['participant_blurb', 'reported_blurb'], r.targetId),
+          reporterDisplayName: await nameOf(r.reporterUserId),
+          targetDisplayName: await nameOf(userId),
+        })
+      }
+    }
+
+    // Reports whose event can no longer be derived (target deleted)
+    // cannot be attributed, so an event filter excludes them.
+    const scoped = query.event ? items.filter((i) => i.eventSlug === query.event) : items
+    scoped.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))
+    return scoped.slice(0, query.limit)
   }
 
   /**

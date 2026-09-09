@@ -295,6 +295,7 @@ function buildDeps(): { appDeps: AppDeps; db?: Db } {
     threads: threadRepo,
     records: recordsRepo,
     reports: reportRepo,
+    contentReports: contentReportRepo,
   })
   const privacy = new PrivacyService({
     events,

@@ -3,6 +3,7 @@ import type { ReportReason } from '@teamup/shared'
 import type { Db } from '../db/client.js'
 import { contentReports } from '../db/schema.js'
 import { isUniqueViolation } from '../db/pg-errors.js'
+import type { ReportListFilter } from './repository.js'
 
 /** What non-message content a report points at. */
 export type ContentReportTargetType = 'team' | 'participant'
@@ -31,6 +32,8 @@ export interface ContentReportRepository {
   resolveForTarget(targetType: ContentReportTargetType, targetId: string): Promise<void>
   /** Reports one user filed (their own data export). */
   listByReporter(reporterUserId: string): Promise<ContentReportRecord[]>
+  /** Newest-first page for the admin report log (ADR-034), optionally by status. */
+  listRecent(filter: ReportListFilter): Promise<ContentReportRecord[]>
 }
 
 export class MemoryContentReportRepository implements ContentReportRepository {
@@ -72,6 +75,16 @@ export class MemoryContentReportRepository implements ContentReportRepository {
       this.records
         .filter((r) => r.reporterUserId === reporterUserId)
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .map((r) => ({ ...r })),
+    )
+  }
+
+  listRecent(filter: ReportListFilter): Promise<ContentReportRecord[]> {
+    return Promise.resolve(
+      this.records
+        .filter((r) => filter.status === undefined || r.status === filter.status)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .slice(0, filter.limit)
         .map((r) => ({ ...r })),
     )
   }
@@ -141,6 +154,16 @@ export class DbContentReportRepository implements ContentReportRepository {
       .from(contentReports)
       .where(eq(contentReports.reporterUserId, reporterUserId))
       .orderBy(desc(contentReports.createdAt))
+    return rows.map(toRecord)
+  }
+
+  async listRecent(filter: ReportListFilter): Promise<ContentReportRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(contentReports)
+      .where(filter.status ? eq(contentReports.status, filter.status) : undefined)
+      .orderBy(desc(contentReports.createdAt))
+      .limit(filter.limit)
     return rows.map(toRecord)
   }
 }

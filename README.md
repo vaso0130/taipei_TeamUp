@@ -16,11 +16,11 @@
 
 - **身分**：只信任已驗證 email 的 Firebase ID token；email 以 canonical 形式（去 `+tag`、Gmail 去點）做 HMAC 身分鍵，別名無法繞過一人一隊或停權；pepper 可輪替。
 - **資料**：email 信封加密（Cloud KMS KEK）、訊息本文加密；審核紀錄與稽核紀錄 180 天、刪帳 30 天後硬刪，皆由每日排程落實。
-- **審核**：規則前處理 + Gemini structured output + prompt injection 防護；worker 冪等、fail-closed；管理員只能調閱風險相關對話，每次調閱先寫稽核（寫不進就不給內容）。
+- **審核**：規則前處理 + Gemini structured output + prompt injection 防護；worker 冪等、fail-closed；管理員只能調閱風險相關對話，每次調閱先寫稽核（寫不進就不給內容）；後台檢舉紀錄只列原因、狀態與判定等中繼資料，不含被檢舉內容與 Email（ADR-034）。
 - **濫用防護**：帳號層限流（開團 3/日、訊息 30/時、檢舉 10/時、匯出 3/日等，`RATE_LIMIT_*` 可調）、body 64 KB 上限、路徑參數 UUID 驗證、自由文字拒絕控制字元、reCAPTCHA Enterprise（設定後啟用）。
 - **前端**：CSP `script-src 'self'`（不用 inline script）、`frame-ancestors 'none'`、使用者內容一律純文字（`v-html` 為 ESLint error）、訊息對象名稱只信任伺服端。
 
-細節見 [`docs/architecture.md`](docs/architecture.md) 與 [`docs/privacy.md`](docs/privacy.md)；架構決策紀錄以 ADR 編號引用（ADR-025～033 為 2026-09 全站 QA 修復）。
+細節見 [`docs/architecture.md`](docs/architecture.md) 與 [`docs/privacy.md`](docs/privacy.md)；架構決策紀錄以 ADR 編號引用（ADR-025～034 為 2026-09 全站 QA 修復與補強）。
 
 ## 本機開發
 
@@ -65,6 +65,8 @@ pnpm seed                                 # 匯入活動 seed
 
 - `codefest-2026-fall.json` — 黑客松（4–5 人、一人一隊、需 2 位聯絡人）
 - `weekend-bookclub.json` — 讀書會（3–6 人、不限團數、免聯絡人）——證明通用性的示範活動
+
+多場活動同時開放與「後台表單建立活動、不用寫 JSON」是下一個里程碑（M7），設計草稿與任務拆解見 [`docs/roadmap.md`](docs/roadmap.md)。
 
 ## 架構
 

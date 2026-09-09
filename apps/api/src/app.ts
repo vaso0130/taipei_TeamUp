@@ -6,6 +6,7 @@ import { requestId } from 'hono/request-id'
 import { z, type ZodType } from 'zod'
 import {
   AdminDecideSchema,
+  AdminReportsQuerySchema,
   ApplySchema,
   ContactsSchema,
   CreateTeamSchema,
@@ -767,6 +768,19 @@ export function createApp(deps: AppDeps) {
   /** Risk overview: high/medium/reported/spot-check messages (metadata only). */
   app.get('/api/admin/messages/risk', async (c) => {
     return c.json({ items: await authed!.admin.listRiskMessages() })
+  })
+
+  /**
+   * Report log (ADR-034): message + team + participant reports merged
+   * newest-first, metadata only — no reported text, no email. Nothing
+   * is decrypted, so (like the risk overview) the read is not audited.
+   */
+  app.get('/api/admin/reports', async (c) => {
+    const parsed = AdminReportsQuerySchema.safeParse(c.req.query())
+    if (!parsed.success) {
+      return c.json({ error: 'validation_failed', issues: parsed.error.issues }, 400)
+    }
+    return c.json({ items: await authed!.admin.listReports(parsed.data) })
   })
 
   /**

@@ -1,5 +1,6 @@
 import type {
   AdminDecideInput,
+  AdminReportItem,
   AdminStats,
   AdminTeamItem,
   AdminThreadDetail,
@@ -200,6 +201,12 @@ export const api = {
     request<AdminStats>(`/api/admin/stats?event=${encodeURIComponent(eventSlug)}`, { token }),
   adminListRisk: (token: TokenSource) =>
     request<{ items: RiskMessageItem[] }>('/api/admin/messages/risk', { token }),
+  /** Report log — metadata only (ADR-034); `eventSlug` absent = every event. */
+  adminListReports: (token: TokenSource, eventSlug?: string) =>
+    request<{ items: AdminReportItem[] }>(
+      `/api/admin/reports${eventSlug ? `?event=${encodeURIComponent(eventSlug)}` : ''}`,
+      { token },
+    ),
   adminGetThread: (token: TokenSource, threadId: string) =>
     request<AdminThreadDetail>(`/api/admin/threads/${encodeURIComponent(threadId)}`, { token }),
   adminUserModeration: (token: TokenSource, userId: string) =>

@@ -172,6 +172,7 @@ export function buildTestApp(
         threads: threadRepo,
         records: moderationRecords,
         reports: reportRepo,
+        contentReports: contentReportRepo,
       }),
       privacy: new PrivacyService({
         events: eventsRepo,
