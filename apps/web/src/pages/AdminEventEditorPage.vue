@@ -786,6 +786,7 @@ const descriptionCount = computed(() => `${form.description.length} / 2000`)
                   ref="statusCard"
                   :status="form.status"
                   :term-team="editor.termTeam.value"
+                  :slug="editor.savedSlug.value"
                   :dirty="editor.dirty.value"
                   :busy="editor.statusBusy.value"
                   :error="editor.statusError.value"

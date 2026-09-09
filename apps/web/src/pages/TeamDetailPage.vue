@@ -5,6 +5,7 @@ import type { ApplicationView, TeamDetail } from '@teamup/shared'
 import { api } from '../api/client.js'
 import { classifyLoadError, describeApiError, type LoadFailure } from '../lib/errors.js'
 import { captchaToken } from '../lib/recaptcha.js'
+import EmptyState from '../components/EmptyState.vue'
 import LoadError from '../components/LoadError.vue'
 import ReportDialog from '../components/ReportDialog.vue'
 import TagChip from '../components/TagChip.vue'
@@ -17,20 +18,37 @@ const router = useRouter()
 const eventStore = useEventStore()
 const auth = useAuthStore()
 
+const slug = computed(() => String(route.params.slug))
 const teamId = computed(() => String(route.params.id))
 const team = ref<TeamDetail | null>(null)
 const loading = ref(true)
 const loadError = ref<LoadFailure | null>(null)
 const pendingApplications = ref<ApplicationView[]>([])
+const teamsList = computed(() => ({ name: 'teams', params: { slug: slug.value } }))
 
 const errorCtx = () => ({ termTeam: eventStore.termTeam, termMember: eventStore.termMember })
 
 async function load() {
   loading.value = true
   loadError.value = null
+  // Draft preview (§3): a draft has no teams — render the empty state, ask nothing.
+  if (eventStore.preview) {
+    team.value = null
+    loading.value = false
+    return
+  }
   try {
-    team.value = await api.getTeam(teamId.value, auth.token ? auth.getToken : undefined)
-    if (team.value.viewerIsOwner && auth.token) {
+    const loaded = await api.getTeam(teamId.value, auth.token ? auth.getToken : undefined)
+    // Teams are event-scoped: a link pasted under the wrong slug lands on the right one.
+    if (loaded.eventSlug !== slug.value) {
+      await router.replace({
+        name: 'team-detail',
+        params: { slug: loaded.eventSlug, id: loaded.id },
+      })
+      return
+    }
+    team.value = loaded
+    if (loaded.viewerIsOwner && auth.token) {
       pendingApplications.value = (
         await api.listTeamApplications(auth.getToken, teamId.value)
       ).applications
@@ -44,12 +62,14 @@ async function load() {
 }
 
 onMounted(async () => {
-  await eventStore.ensureLoaded()
+  await eventStore.ensureLoaded(slug.value)
   await load()
 })
 watch(() => auth.isLoggedIn, load)
 
 const event = computed(() => eventStore.event)
+/** Archived event or draft preview: nothing on this page can be changed (§3, §4). */
+const readOnly = computed(() => eventStore.readOnly)
 
 const statusMeta = computed(() => {
   switch (team.value?.status) {
@@ -88,7 +108,8 @@ const canApply = computed(
     team.value &&
     !team.value.viewerIsMember &&
     team.value.status === 'recruiting' &&
-    eventStore.recruitOpen,
+    eventStore.recruitOpen &&
+    !readOnly.value,
 )
 
 async function submitApply() {
@@ -249,7 +270,7 @@ async function removeTeam() {
   deleting.value = true
   try {
     await api.deleteTeam(auth.getToken, team.value.id)
-    await router.push({ name: 'teams' })
+    await router.push(teamsList.value)
   } catch (err) {
     deleting.value = false
     needsFeedback.value = describeApiError(err, errorCtx(), '刪除失敗，請稍後再試', {
@@ -267,7 +288,7 @@ async function leave() {
   leaving.value = true
   try {
     await api.leaveTeam(auth.getToken, team.value.id)
-    await router.push({ name: 'teams' })
+    await router.push(teamsList.value)
   } catch (err) {
     leaving.value = false
     leaveError.value = describeApiError(err, errorCtx(), '離開失敗，請稍後再試')
@@ -286,6 +307,16 @@ const applicationMessageOf = (a: ApplicationView) => {
   <div>
     <p v-if="loading" class="text-dim" aria-live="polite">載入中⋯</p>
 
+    <EmptyState
+      v-else-if="eventStore.preview"
+      :title="`草稿尚無${eventStore.termTeam}`"
+      hint="草稿尚無資料——開放活動後參加者才能開團。"
+    >
+      <template #action>
+        <RouterLink :to="teamsList" class="btn btn-quiet">回列表</RouterLink>
+      </template>
+    </EmptyState>
+
     <template v-else-if="loadError || !team">
       <LoadError
         :kind="loadError ?? 'failed'"
@@ -294,13 +325,13 @@ const applicationMessageOf = (a: ApplicationView) => {
         @retry="load"
       >
         <template #action>
-          <RouterLink to="/teams" class="btn btn-quiet">回列表</RouterLink>
+          <RouterLink :to="teamsList" class="btn btn-quiet">回列表</RouterLink>
         </template>
       </LoadError>
     </template>
 
     <template v-else>
-      <RouterLink to="/teams" class="text-sm text-dim hover:text-ink">← 回{{ eventStore.termTeam }}列表</RouterLink>
+      <RouterLink :to="teamsList" class="text-sm text-dim hover:text-ink">← 回{{ eventStore.termTeam }}列表</RouterLink>
 
       <!-- signboard header -->
       <section class="card mt-3 overflow-hidden">
@@ -317,7 +348,7 @@ const applicationMessageOf = (a: ApplicationView) => {
             </span>
             <span class="grow"></span>
             <button
-              v-if="auth.isLoggedIn && !team.viewerIsOwner"
+              v-if="auth.isLoggedIn && !team.viewerIsOwner && !readOnly"
               class="cursor-pointer text-xs text-dim underline decoration-dotted underline-offset-2 hover:text-danger"
               @click="reportOpen = true"
             >
@@ -375,7 +406,7 @@ const applicationMessageOf = (a: ApplicationView) => {
               {{ contactRankLabel(contactRankOf(member.userId)!) }}
             </span>
             <RouterLink
-              v-if="team.viewerIsMember && !isSelf(member.userId)"
+              v-if="team.viewerIsMember && !isSelf(member.userId) && !readOnly"
               :to="{ name: 'messages', query: { to: member.userId, team: team.id } }"
               class="ml-auto inline-flex min-h-11 items-center px-2 text-sm font-medium text-primary-deep hover:underline"
             >
@@ -386,7 +417,7 @@ const applicationMessageOf = (a: ApplicationView) => {
 
         <p v-if="leaveError" class="mt-3 text-sm text-danger" role="alert">{{ leaveError }}</p>
         <button
-          v-if="team.viewerIsMember && !team.viewerIsOwner"
+          v-if="team.viewerIsMember && !team.viewerIsOwner && !readOnly"
           class="btn btn-danger mt-4"
           :disabled="leaving"
           @click="leave"
@@ -421,7 +452,10 @@ const applicationMessageOf = (a: ApplicationView) => {
           {{ applying ? '送出中⋯' : '送出申請' }}
         </button>
       </section>
-      <section v-else-if="!auth.isLoggedIn && team.status === 'recruiting'" class="card mt-5 p-6">
+      <section
+        v-else-if="!auth.isLoggedIn && team.status === 'recruiting' && eventStore.recruitOpen && !readOnly"
+        class="card mt-5 p-6"
+      >
         <p>
           想加入這個{{ eventStore.termTeam }}？
           <RouterLink to="/profile" class="font-medium text-primary-deep underline">先登入</RouterLink>
@@ -430,7 +464,7 @@ const applicationMessageOf = (a: ApplicationView) => {
       </section>
 
       <!-- owner: pending applications -->
-      <section v-if="team.viewerIsOwner" class="card mt-5 p-6" aria-labelledby="pending-title">
+      <section v-if="team.viewerIsOwner && !readOnly" class="card mt-5 p-6" aria-labelledby="pending-title">
         <h2 id="pending-title" class="font-bold">待處理的申請（{{ pendingApplications.length }}）</h2>
         <p v-if="respondFeedback" class="mt-2 text-sm text-danger" role="alert">{{ respondFeedback }}</p>
         <p v-if="pendingApplications.length === 0" class="mt-2 text-sm text-dim">
@@ -460,7 +494,7 @@ const applicationMessageOf = (a: ApplicationView) => {
       </section>
 
       <!-- owner: contacts -->
-      <section v-if="contactsReady" class="card mt-5 p-6" aria-labelledby="contacts-title">
+      <section v-if="contactsReady && !readOnly" class="card mt-5 p-6" aria-labelledby="contacts-title">
         <h2 id="contacts-title" class="font-bold">指定聯絡人</h2>
         <p v-if="!contactsAllowed" class="mt-2 text-sm text-dim">
           {{ eventStore.termTeam }}達到 {{ event?.minMembers }} 名{{ eventStore.termMember
@@ -493,7 +527,7 @@ const applicationMessageOf = (a: ApplicationView) => {
       </section>
 
       <!-- owner: manage recruiting -->
-      <section v-if="team.viewerIsOwner" class="card mt-5 p-6" aria-labelledby="manage-title">
+      <section v-if="team.viewerIsOwner && !readOnly" class="card mt-5 p-6" aria-labelledby="manage-title">
         <h2 id="manage-title" class="font-bold">招募設定</h2>
 
         <div class="mt-3">

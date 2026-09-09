@@ -16,6 +16,7 @@ const eventStore = useEventStore()
 const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
+const slug = computed(() => String(route.params.slug))
 
 const teams = ref<TeamSummary[]>([])
 const loading = ref(true)
@@ -43,15 +44,20 @@ watch(filters, () => {
 async function loadTeams() {
   loading.value = true
   loadError.value = null
-  await eventStore.ensureLoaded()
-  const slug = eventStore.event?.slug
-  if (!slug) {
-    loadError.value = 'failed'
+  const detail = await eventStore.ensureLoaded(slug.value)
+  if (!detail) {
+    loadError.value = eventStore.failures[slug.value] ?? 'failed'
+    loading.value = false
+    return
+  }
+  // Draft preview (§3): there is no data behind a draft, so do not ask.
+  if (eventStore.preview) {
+    teams.value = []
     loading.value = false
     return
   }
   try {
-    teams.value = (await api.listTeams(slug, filters)).teams
+    teams.value = (await api.listTeams(slug.value, filters)).teams
   } catch (err) {
     teams.value = []
     loadError.value = classifyLoadError(err)
@@ -61,17 +67,16 @@ async function loadTeams() {
 }
 
 async function loadMyTeam() {
-  const slug = eventStore.event?.slug
-  if (!slug || !auth.token || !auth.isLoggedIn) return
+  if (!auth.token || !auth.isLoggedIn || eventStore.preview) return
   try {
-    myTeam.value = (await api.myTeam(auth.getToken, slug)).team
+    myTeam.value = (await api.myTeam(auth.getToken, slug.value)).team
   } catch {
     myTeam.value = null
   }
 }
 
 onMounted(async () => {
-  await eventStore.ensureLoaded()
+  await eventStore.ensureLoaded(slug.value)
   await Promise.all([loadTeams(), loadMyTeam()])
 })
 watch(
@@ -99,18 +104,17 @@ function validateName() {
 async function createTeam() {
   validateName()
   if (formErrors.name) return
-  const slug = eventStore.event?.slug
-  if (!slug || !auth.token) return
+  if (!auth.token) return
   creating.value = true
   createError.value = ''
   try {
     const detail = await api.createTeam(
       auth.getToken,
-      slug,
+      slug.value,
       { ...form, name: form.name.trim() },
       await captchaToken('create_team'),
     )
-    await router.push({ name: 'team-detail', params: { id: detail.id } })
+    await router.push({ name: 'team-detail', params: { slug: slug.value, id: detail.id } })
   } catch (err) {
     createError.value = describeApiError(
       err,
@@ -129,10 +133,16 @@ async function createTeam() {
 }
 
 const canCreate = computed(
-  () => auth.isLoggedIn && eventStore.recruitOpen && !(eventStore.event?.exclusiveMembership && myTeam.value),
+  () =>
+    auth.isLoggedIn &&
+    eventStore.recruitOpen &&
+    !eventStore.readOnly &&
+    !(eventStore.event?.exclusiveMembership && myTeam.value),
 )
 /** Landed on ?create=1 without a session: explain instead of showing nothing. */
-const needsLoginToCreate = computed(() => showCreate.value && !auth.isLoggedIn && !auth.loading)
+const needsLoginToCreate = computed(
+  () => showCreate.value && !auth.isLoggedIn && !auth.loading && !eventStore.readOnly,
+)
 </script>
 
 <template>
@@ -155,7 +165,7 @@ const needsLoginToCreate = computed(() => showCreate.value && !auth.isLoggedIn &
     >
       <span>請先登入，登入後即可建立{{ eventStore.termTeam }}。</span>
       <RouterLink
-        :to="{ name: 'profile', query: { next: 'create-team' } }"
+        :to="{ name: 'profile', query: { next: 'create-team', event: slug } }"
         class="btn btn-primary text-sm"
       >
         前往登入
@@ -165,7 +175,7 @@ const needsLoginToCreate = computed(() => showCreate.value && !auth.isLoggedIn &
     <!-- my team banner -->
     <RouterLink
       v-if="myTeam"
-      :to="{ name: 'team-detail', params: { id: myTeam.id } }"
+      :to="{ name: 'team-detail', params: { slug, id: myTeam.id } }"
       class="card mt-5 flex items-center justify-between gap-3 border-primary bg-primary-mist px-5 py-4 transition-colors duration-150 hover:border-primary-deep"
     >
       <span>
@@ -286,7 +296,7 @@ const needsLoginToCreate = computed(() => showCreate.value && !auth.isLoggedIn &
       v-else
       class="mt-6"
       :title="`還沒有符合條件的${eventStore.termTeam}`"
-      hint="調整篩選條件，或自己開一個！"
+      :hint="eventStore.preview ? '草稿尚無資料——開放活動後參加者才能開團。' : '調整篩選條件，或自己開一個！'"
     >
       <template v-if="canCreate" #action>
         <button class="btn btn-cta" @click="showCreate = true">建立{{ eventStore.termTeam }}</button>

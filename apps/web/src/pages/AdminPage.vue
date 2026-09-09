@@ -16,6 +16,7 @@ import EmptyState from '../components/EmptyState.vue'
 import ModalShell from '../components/ModalShell.vue'
 import { formatDateTime } from '../lib/format.js'
 import { useAuthStore } from '../stores/auth.js'
+import { ENV_EVENT_SLUG, preferredEventSlug } from '../lib/event-routes.js'
 import { useEventStore } from '../stores/event.js'
 
 const auth = useAuthStore()
@@ -127,14 +128,14 @@ async function load() {
   loading.value = true
   forbidden.value = false
   try {
-    const slug = eventStore.event?.slug
+    const slug = eventStore.current
     const [pending, risk, overview, roster, teamList, reportLog] = await Promise.all([
       api.adminListPending(auth.getToken),
       api.adminListRisk(auth.getToken),
       slug ? api.adminStats(auth.getToken, slug) : Promise.resolve(null),
       slug ? api.adminListUsers(auth.getToken, slug) : Promise.resolve({ items: [] }),
       slug ? api.adminListTeams(auth.getToken, slug) : Promise.resolve({ items: [] }),
-      api.adminListReports(auth.getToken, slug),
+      api.adminListReports(auth.getToken, slug ?? undefined),
     ])
     items.value = pending.items
     riskItems.value = risk.items
@@ -154,7 +155,14 @@ async function load() {
 }
 
 onMounted(async () => {
-  await eventStore.ensureLoaded()
+  // Per-event panels follow the event the admin was last in; without one,
+  // the build-time default / first open event (an event switcher is a later task).
+  const slug = preferredEventSlug(
+    eventStore.current,
+    ENV_EVENT_SLUG,
+    await eventStore.ensureSummaries(),
+  )
+  if (slug) await eventStore.select(slug)
   await load()
 })
 // On a hard reload the Firebase session is restored after mount; without

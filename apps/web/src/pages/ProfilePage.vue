@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
-import type { ParticipationInput } from '@teamup/shared'
 import { api, ApiError } from '../api/client.js'
 import { describeApiError } from '../lib/errors.js'
+import { ENV_EVENT_SLUG, legacyEventSlug, preferredEventSlug } from '../lib/event-routes.js'
 import { emailToUnicode } from '../lib/punycode.js'
-import TagChip from '../components/TagChip.vue'
+import LoadError from '../components/LoadError.vue'
+import ParticipationForm from '../components/ParticipationForm.vue'
 import { useAuthStore } from '../stores/auth.js'
 import { useEventStore } from '../stores/event.js'
 
@@ -15,24 +16,42 @@ const router = useRouter()
 const route = useRoute()
 
 onMounted(() => {
-  void eventStore.ensureLoaded()
+  void eventStore.ensureSummaries()
   // The login page is where a returning Firebase session is worth restoring.
   if (auth.usesFirebase) void auth.ensureFirebase()
 })
 
 const errorCtx = () => ({ termTeam: eventStore.termTeam, termMember: eventStore.termMember })
 
-/** Arrived from a "create team" CTA while signed out: explain, then continue after login. */
+/**
+ * Arrived from a "create team" CTA while signed out: explain, then continue
+ * after login. The CTA carries its event (`?event=`); a bare `?next=` (old
+ * links) falls back to the legacy rule — build-time slug, else the sole
+ * open event, else the event list.
+ */
 const nextIsCreateTeam = computed(() => route.query.next === 'create-team')
+async function continueToCreateTeam() {
+  const fromQuery = typeof route.query.event === 'string' ? route.query.event : null
+  const slug = fromQuery ?? legacyEventSlug(ENV_EVENT_SLUG, await eventStore.ensureSummaries())
+  if (slug) await router.replace({ name: 'teams', params: { slug }, query: { create: '1' } })
+  else await router.replace({ name: 'home' })
+}
 watch(
   () => auth.isLoggedIn,
   (loggedIn) => {
-    if (loggedIn && nextIsCreateTeam.value) {
-      void router.replace({ name: 'teams', query: { create: '1' } })
-    }
+    if (loggedIn && nextIsCreateTeam.value) void continueToCreateTeam()
   },
   { immediate: true },
 )
+
+// ---- per-event participation (§5): one section per open event ----
+const openEvents = computed(() => eventStore.openEvents)
+const summariesReady = computed(() => eventStore.summaries !== null)
+/** Expanded by default: the event the visitor came from, else the build-time default, else the first. */
+const defaultOpenSlug = computed(() =>
+  preferredEventSlug(eventStore.current, ENV_EVENT_SLUG, openEvents.value),
+)
+const sectionId = (slug: string) => `participation-title-${slug}`
 
 // ---- data rights: export & delete (spec §6.5) ----
 const exporting = ref(false)
@@ -133,105 +152,6 @@ async function saveDisplayName() {
   }
 }
 
-// ---- per-event participation ----
-const event = computed(() => eventStore.event)
-const form = reactive<ParticipationInput>({
-  intent: 'looking_for_team',
-  preferredRoles: [],
-  skills: [],
-  blurb: '',
-  customTags: [],
-  guardianConsentConfirmed: false,
-})
-/** Comma/、-separated editing buffer for free-form tags. */
-const customTagsText = ref('')
-const blurbVisibility = ref<string | null>(null)
-const loadedParticipation = ref(false)
-
-/** Buffer cap: every allowed tag at max length plus a separator each. */
-const customTagsMaxLength = computed(() => {
-  const e = event.value
-  if (!e) return undefined
-  return e.maxCustomTags * (e.customTagMaxLength + 1)
-})
-
-watch(
-  [() => auth.me, event],
-  async ([me, e]) => {
-    if (!me || !e || !auth.token || loadedParticipation.value) return
-    loadedParticipation.value = true
-    const existing = await api.getParticipation(auth.getToken, e.slug).catch(() => null)
-    if (existing) {
-      form.intent = existing.intent
-      form.preferredRoles = [...existing.preferredRoles]
-      form.skills = [...existing.skills]
-      form.blurb = existing.blurb
-      form.customTags = [...existing.customTags]
-      customTagsText.value = existing.customTags.join('、')
-      form.isAdult = existing.isAdult ?? undefined
-      form.guardianConsentConfirmed = existing.guardianConsentConfirmed
-      blurbVisibility.value = existing.blurbVisibility
-    }
-  },
-  { immediate: true },
-)
-
-function toggleKey(list: string[], key: string) {
-  const i = list.indexOf(key)
-  if (i >= 0) list.splice(i, 1)
-  else list.push(key)
-}
-
-const savingForm = ref(false)
-const formMessage = ref<{ kind: 'ok' | 'error'; text: string } | null>(null)
-async function saveParticipation() {
-  const e = event.value
-  if (!auth.token || !e) return
-  formMessage.value = null
-  // Parse the tag buffer: comma (half/full width) or 、 separated.
-  form.customTags = [
-    ...new Set(
-      customTagsText.value
-        .split(/[,，、]/)
-        .map((t) => t.trim())
-        .filter((t) => t.length > 0),
-    ),
-  ]
-  const tagRule = `自訂標籤最多 ${e.maxCustomTags} 個、每個最長 ${e.customTagMaxLength} 字`
-  if (
-    form.customTags.length > e.maxCustomTags ||
-    form.customTags.some((t) => t.length > e.customTagMaxLength)
-  ) {
-    formMessage.value = { kind: 'error', text: tagRule }
-    return
-  }
-  savingForm.value = true
-  try {
-    const view = await api.putParticipation(auth.getToken, e.slug, { ...form })
-    blurbVisibility.value = view.blurbVisibility
-    formMessage.value = { kind: 'ok', text: '已儲存' }
-  } catch (err) {
-    formMessage.value = {
-      kind: 'error',
-      text: describeApiError(err, errorCtx(), '儲存失敗，請稍後再試', {
-        adult_check_required: '請先回答是否年滿 18 歲',
-        invalid_custom_tags: tagRule,
-        validation_failed: '自我介紹最多 500 字，請檢查欄位內容',
-      }),
-    }
-  } finally {
-    savingForm.value = false
-  }
-}
-
-const intentOptions = computed(() => {
-  const termTeam = eventStore.termTeam
-  return [
-    { value: 'looking_for_team', label: `我想找${termTeam}`, hint: '會出現在「找人」列表' },
-    { value: 'has_team', label: `我已有${termTeam}`, hint: '' },
-    { value: 'browsing', label: '先看看', hint: '' },
-  ] as const
-})
 </script>
 
 <template>
@@ -341,137 +261,55 @@ const intentOptions = computed(() => {
         <p v-if="accountMessage" class="field-error" role="alert">{{ accountMessage }}</p>
       </section>
 
-      <section v-if="event" class="card p-6" aria-labelledby="participation-title">
-        <h2 id="participation-title" class="font-bold">我在「{{ event.name }}」</h2>
-
-        <fieldset class="mt-4">
-          <legend class="field-label">狀態</legend>
-          <div class="flex flex-wrap gap-2">
-            <label
-              v-for="opt in intentOptions"
-              :key="opt.value"
-              class="chip chip-selectable !py-2"
-              :class="{ 'chip-selected': form.intent === opt.value }"
-            >
-              <input v-model="form.intent" type="radio" class="sr-only" :value="opt.value" />
-              {{ opt.label }}
-            </label>
-          </div>
-          <p class="field-hint">
-            {{ intentOptions.find((o) => o.value === form.intent)?.hint ?? '' }}
-          </p>
-        </fieldset>
-
-        <fieldset v-if="eventStore.detail?.roles.length" class="mt-4">
-          <legend class="field-label">偏好角色</legend>
-          <div class="flex flex-wrap gap-2">
-            <TagChip
-              v-for="role in eventStore.detail.roles"
-              :key="role.key"
-              :label="role.label"
-              selectable
-              :selected="form.preferredRoles.includes(role.key)"
-              @toggle="toggleKey(form.preferredRoles, role.key)"
-            />
-          </div>
-        </fieldset>
-
-        <fieldset v-for="group in eventStore.skillGroups" :key="group.category" class="mt-4">
-          <legend class="field-label">{{ group.category }}</legend>
-          <div class="flex flex-wrap gap-2">
-            <TagChip
-              v-for="skill in group.skills"
-              :key="skill.key"
-              :label="skill.label"
-              :dot="group.color"
-              selectable
-              :selected="form.skills.includes(skill.key)"
-              @toggle="toggleKey(form.skills, skill.key)"
-            />
-          </div>
-        </fieldset>
-
-        <div class="mt-4">
-          <label class="field-label" for="blurb">
-            自我介紹
-            <span
-              v-if="blurbVisibility === 'pending_review'"
-              class="ml-2 rounded-full bg-warn-mist px-2 py-0.5 text-xs font-normal text-warn"
-            >
-              審核中
-            </span>
-            <span
-              v-else-if="blurbVisibility === 'blocked'"
-              class="ml-2 rounded-full bg-danger-mist px-2 py-0.5 text-xs font-normal text-danger"
-            >
-              未通過審核
-            </span>
-          </label>
-          <textarea
-            id="blurb"
-            v-model="form.blurb"
-            rows="3"
-            maxlength="500"
-            class="field-input"
-            aria-describedby="blurb-hint"
-            placeholder="介紹一下自己，讓別人知道你想做什麼"
-          ></textarea>
-          <p id="blurb-hint" class="field-hint">發布前會經過自動化風險檢測，通過後才公開。</p>
-          <p v-if="blurbVisibility === 'blocked'" class="field-hint text-danger">
-            目前的自我介紹未通過審核，其他人看不到。若認為誤判，請透過 GitHub Issues 或活動主辦單位聯繫。
-          </p>
-
-          <template v-if="(event?.maxCustomTags ?? 0) > 0">
-            <label class="field-label mt-4" for="custom-tags">
-              自訂技能標籤（選填）
-            </label>
-            <input
-              id="custom-tags"
-              v-model="customTagsText"
-              class="field-input"
-              type="text"
-              :maxlength="customTagsMaxLength"
-              :placeholder="'例如：Rust、Godot、手語（最多 ' + event!.maxCustomTags + ' 個，以逗號或頓號分隔）'"
-              aria-describedby="custom-tags-hint"
-            />
-            <p id="custom-tags-hint" class="field-hint">
-              字典裡沒有的技能可以自己加，最多 {{ event!.maxCustomTags }} 個、每個
-              {{ event!.customTagMaxLength }} 字內；與自介一併通過風險檢測後公開。
-            </p>
-          </template>
-        </div>
-
-        <fieldset v-if="event.requiresAdultCheck" class="mt-4">
-          <legend class="field-label">你是否年滿 18 歲？</legend>
-          <div class="flex gap-2">
-            <label class="chip chip-selectable !py-2" :class="{ 'chip-selected': form.isAdult === true }">
-              <input v-model="form.isAdult" type="radio" class="sr-only" :value="true" /> 是
-            </label>
-            <label class="chip chip-selectable !py-2" :class="{ 'chip-selected': form.isAdult === false }">
-              <input v-model="form.isAdult" type="radio" class="sr-only" :value="false" /> 否
-            </label>
-          </div>
-          <div v-if="form.isAdult === false" class="mt-3 rounded-lg bg-warn-mist px-4 py-3 text-sm text-warn">
-            <p>報名活動時需檢附法定代理人書面同意書，由活動主辦單位收取；本平台不收也不儲存同意書。</p>
-            <label class="mt-2 flex items-center gap-2">
-              <input v-model="form.guardianConsentConfirmed" type="checkbox" />
-              我確認已取得法定代理人同意
-            </label>
-          </div>
-        </fieldset>
-
-        <p
-          v-if="formMessage"
-          class="mt-4 text-sm"
-          :class="formMessage.kind === 'ok' ? 'text-ok' : 'text-danger'"
-          role="status"
-        >
-          {{ formMessage.text }}
+      <!-- participation: one collapsible section per open event (§5) -->
+      <LoadError
+        v-if="eventStore.summariesError && !summariesReady"
+        :kind="eventStore.summariesError"
+        title="活動列表載入失敗"
+        @retry="eventStore.ensureSummaries()"
+      />
+      <p v-else-if="!summariesReady" class="text-sm text-dim" aria-live="polite">載入活動⋯</p>
+      <section v-else-if="openEvents.length === 0" class="card p-6" aria-labelledby="no-events-title">
+        <h2 id="no-events-title" class="font-bold">參加資料</h2>
+        <p class="mt-2 text-sm text-dim">
+          目前沒有進行中的活動。有活動開放招募時，這裡會出現每場活動的參加資料表單。
         </p>
-        <button class="btn btn-primary mt-4" :disabled="savingForm" @click="saveParticipation">
-          {{ savingForm ? '儲存中⋯' : '儲存檔案' }}
-        </button>
       </section>
+      <template v-else>
+        <section
+          v-for="e in openEvents"
+          :key="e.slug"
+          class="card"
+          :aria-labelledby="sectionId(e.slug)"
+        >
+        <details :open="e.slug === defaultOpenSlug" class="group p-6">
+          <summary class="flex min-h-[44px] cursor-pointer list-none items-center justify-between gap-3 [&::-webkit-details-marker]:hidden">
+            <h2 :id="sectionId(e.slug)" class="font-bold">我在「{{ e.name }}」</h2>
+            <span class="flex items-center gap-2 text-xs text-dim">
+              <RouterLink
+                :to="{ name: 'event-home', params: { slug: e.slug } }"
+                class="inline-flex min-h-[44px] items-center underline decoration-dotted underline-offset-2 hover:text-ink"
+              >
+                前往活動
+              </RouterLink>
+              <svg
+                class="h-4 w-4 transition-transform group-open:rotate-180"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M6 9l6 6 6-6" />
+              </svg>
+            </span>
+          </summary>
+          <ParticipationForm :slug="e.slug" />
+        </details>
+        </section>
+      </template>
     </template>
   </div>
 </template>

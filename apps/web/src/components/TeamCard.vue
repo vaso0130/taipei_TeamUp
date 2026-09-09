@@ -23,7 +23,7 @@ const max = computed(() => eventStore.event?.maxMembers ?? 0)
 
 <template>
   <RouterLink
-    :to="{ name: 'team-detail', params: { id: team.id } }"
+    :to="{ name: 'team-detail', params: { slug: eventStore.current ?? '', id: team.id } }"
     class="card block overflow-hidden transition-colors duration-150 hover:border-primary"
   >
     <!-- signboard top rule: status carries the color -->

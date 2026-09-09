@@ -2,6 +2,11 @@
 import { RouterLink } from 'vue-router'
 import { useEventStore } from '../stores/event.js'
 
+/**
+ * 404 — also rendered by the event home for an unknown slug. The "back to
+ * teams" shortcut only makes sense when we know which event the visitor
+ * was in (and it actually loaded).
+ */
 const eventStore = useEventStore()
 </script>
 
@@ -14,7 +19,13 @@ const eventStore = useEventStore()
     </p>
     <div class="mt-6 flex flex-wrap justify-center gap-3">
       <RouterLink to="/" class="btn btn-primary">回首頁</RouterLink>
-      <RouterLink to="/teams" class="btn btn-quiet">找{{ eventStore.termTeam }}</RouterLink>
+      <RouterLink
+        v-if="eventStore.current && eventStore.detail"
+        :to="{ name: 'teams', params: { slug: eventStore.current } }"
+        class="btn btn-quiet"
+      >
+        找{{ eventStore.termTeam }}
+      </RouterLink>
     </div>
   </section>
 </template>

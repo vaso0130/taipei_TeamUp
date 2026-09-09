@@ -17,6 +17,8 @@ import EventStatusBadge from './EventStatusBadge.vue'
 const props = defineProps<{
   status: EventStatus
   termTeam: string
+  /** Saved slug — enables the "open the public page" link (draft preview is admin-only, §3). */
+  slug?: string | null
   /** Unsaved edits: status changes are blocked until saved (§6). */
   dirty: boolean
   busy: boolean
@@ -99,6 +101,14 @@ const dialog = computed(() => {
 
 const blockedByChecklist = computed(() => pending.value === 'open' && (props.openChecklist?.length ?? 0) > 0)
 
+/** Public event page; a draft renders there only for admins (store fallback, §3). */
+const publicHref = computed(() => (props.slug ? `/e/${encodeURIComponent(props.slug)}` : null))
+const publicLinkLabel = computed(() => {
+  if (props.status === 'draft') return '預覽前台'
+  if (props.status === 'open' || props.status === 'closed') return '查看前台'
+  return null
+})
+
 function confirm() {
   if (!pending.value || blockedByChecklist.value) return
   emit('change', pending.value)
@@ -114,6 +124,13 @@ function confirm() {
       </p>
     </div>
     <p class="mt-3 text-sm">{{ DESCRIPTION[status] }}</p>
+
+    <p v-if="publicHref && publicLinkLabel" class="mt-3">
+      <a :href="publicHref" target="_blank" rel="noopener" class="btn btn-quiet text-sm">
+        {{ publicLinkLabel }} ↗
+      </a>
+      <span v-if="status === 'draft'" class="ml-2 text-xs text-dim">只有登入的管理員看得到。</span>
+    </p>
 
     <p v-if="error" class="mt-3 rounded-lg bg-danger-mist px-4 py-3 text-sm text-danger" role="alert">
       {{ error }}

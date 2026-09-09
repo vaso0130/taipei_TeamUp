@@ -14,7 +14,17 @@ const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
 
-const threads = ref<ThreadView[]>([])
+/**
+ * Threads are event-scoped on the API (`/api/events/:slug/threads`), so
+ * this cross-event page lists every listed event's threads and tags each
+ * with the event it came from (docs/design/landing-and-event-layer.md §5).
+ */
+interface EventThread extends ThreadView {
+  eventSlug: string
+  eventName: string
+}
+
+const threads = ref<EventThread[]>([])
 const messages = ref<MessageView[]>([])
 const loadingThreads = ref(true)
 const sendError = ref('')
@@ -24,17 +34,21 @@ const sending = ref(false)
 /**
  * Display name of a recipient who has no thread yet. Never taken from the
  * URL (anyone could type a name there); resolved from the team the link
- * came from (?team=<id>) — the recipient must be one of its members.
+ * came from (?team=<id>) — the recipient must be one of its members. The
+ * same lookup tells us which event the new thread belongs to.
  */
 const recipientName = ref<string | null>(null)
+const draftEventSlug = ref<string | null>(null)
 async function resolveRecipientName() {
   recipientName.value = null
+  draftEventSlug.value = null
   const to = route.query.to as string | undefined
   const teamId = route.query.team as string | undefined
   if (!to || !teamId || !auth.token) return
   try {
     const team = await api.getTeam(teamId, auth.getToken)
     recipientName.value = team.members.find((m) => m.userId === to)?.displayName ?? null
+    draftEventSlug.value = team.eventSlug
   } catch {
     recipientName.value = null
   }
@@ -45,7 +59,11 @@ const draftRecipient = computed(() => {
   const to = route.query.to as string | undefined
   if (!to) return null
   if (threads.value.some((t) => t.otherUserId === to)) return null
-  return { userId: to, displayName: recipientName.value ?? '對方' }
+  return {
+    userId: to,
+    displayName: recipientName.value ?? '對方',
+    eventName: draftEventSlug.value ? eventStore.eventName(draftEventSlug.value) : '',
+  }
 })
 
 const selectedThreadId = computed(() => {
@@ -61,22 +79,44 @@ const selectedThread = computed(
 const conversationOpen = computed(() => !!selectedThread.value || !!draftRecipient.value)
 
 const loadError = ref('')
+/** Some events' lists failed while others loaded: say so without hiding what we have. */
+const partialError = ref('')
 
 async function loadThreads() {
-  const slug = eventStore.event?.slug
-  if (!slug || !auth.token || !auth.isLoggedIn) {
+  if (!auth.token || !auth.isLoggedIn) {
     loadingThreads.value = false
     return
   }
   loadingThreads.value = true
   loadError.value = ''
-  try {
-    threads.value = (await api.listThreads(auth.getToken, slug)).threads
-  } catch (err) {
-    loadError.value = describeApiError(err, errorCtx(), '對話列表載入失敗，請重試')
-  } finally {
+  partialError.value = ''
+  const events = await eventStore.ensureSummaries()
+  if (events.length === 0 && eventStore.summariesError) {
+    loadError.value = '活動列表載入失敗，請重試'
     loadingThreads.value = false
+    return
   }
+  // One request per event, at most; failures are collected, not thrown.
+  const results = await Promise.allSettled(
+    events.map(async (e) => {
+      const { threads: list } = await api.listThreads(auth.getToken, e.slug)
+      return list.map((t): EventThread => ({ ...t, eventSlug: e.slug, eventName: e.name }))
+    }),
+  )
+  const merged: EventThread[] = []
+  let failure: unknown = null
+  for (const r of results) {
+    if (r.status === 'fulfilled') merged.push(...r.value)
+    else failure = r.reason
+  }
+  merged.sort((a, b) => Date.parse(b.lastMessageAt) - Date.parse(a.lastMessageAt))
+  threads.value = merged
+  if (failure && merged.length === 0) {
+    loadError.value = describeApiError(failure, errorCtx(), '對話列表載入失敗，請重試')
+  } else if (failure) {
+    partialError.value = '部分活動的對話暫時載入失敗，請稍後重試。'
+  }
+  loadingThreads.value = false
 }
 
 async function loadMessages() {
@@ -109,7 +149,6 @@ function stopPolling() {
 }
 
 onMounted(async () => {
-  await eventStore.ensureLoaded()
   await Promise.all([loadThreads(), resolveRecipientName()])
   await loadMessages()
   if (auth.isLoggedIn) startPolling()
@@ -139,16 +178,31 @@ function backToList() {
 
 const errorCtx = () => ({ termTeam: eventStore.termTeam, termMember: eventStore.termMember })
 
+/**
+ * Event a brand-new thread belongs to: the team the link came from, else
+ * the event the visitor was last in, else the only open event.
+ */
+function eventForNewThread(): string | null {
+  if (draftEventSlug.value) return draftEventSlug.value
+  if (eventStore.current) return eventStore.current
+  const open = eventStore.openEvents
+  return open.length === 1 ? open[0]!.slug : null
+}
+
 async function send() {
   const body = draftBody.value.trim()
-  const slug = eventStore.event?.slug
-  if (!body || !auth.token || !slug) return
+  if (!body || !auth.token) return
   sending.value = true
   sendError.value = ''
   try {
     if (selectedThread.value) {
       await api.sendMessage(auth.getToken, selectedThread.value.id, body)
     } else if (draftRecipient.value) {
+      const slug = eventForNewThread()
+      if (!slug) {
+        sendError.value = `無法判斷這個對話屬於哪場活動，請從${eventStore.termTeam}頁面的「傳訊息」按鈕開始。`
+        return
+      }
       const { thread } = await api.startThread(auth.getToken, slug, draftRecipient.value.userId, body)
       await loadThreads()
       await router.replace({ query: { thread: thread.id } })
@@ -170,6 +224,9 @@ async function send() {
 
 const conversationTitle = computed(
   () => selectedThread.value?.otherDisplayName ?? draftRecipient.value?.displayName ?? '',
+)
+const conversationEvent = computed(
+  () => selectedThread.value?.eventName ?? draftRecipient.value?.eventName ?? '',
 )
 
 // ---- 檢舉（共用 ReportDialog）----
@@ -206,24 +263,31 @@ async function submitReport(reason: string) {
           <p class="text-danger">{{ loadError }}</p>
           <button type="button" class="btn btn-quiet mt-3 text-sm" @click="loadThreads">重試</button>
         </div>
-        <ul v-else-if="threads.length || draftRecipient" class="space-y-2">
-          <li v-if="draftRecipient" class="card border-primary bg-primary-mist p-4">
-            <p class="font-medium">{{ draftRecipient.displayName }}</p>
-            <p class="text-xs text-dim">新對話</p>
-          </li>
-          <li v-for="thread in threads" :key="thread.id">
-            <button
-              class="card w-full cursor-pointer p-4 text-left transition-colors duration-150 hover:border-primary"
-              :class="{ '!border-primary bg-primary-mist': thread.id === selectedThreadId }"
-              @click="openThread(thread)"
-            >
-              <p class="font-medium">{{ thread.otherDisplayName }}</p>
-              <p class="mt-0.5 font-mono text-xs text-dim">
-                {{ formatDateTime(thread.lastMessageAt) }}
+        <template v-else-if="threads.length || draftRecipient">
+          <p v-if="partialError" class="mb-2 text-xs text-warn" role="status">{{ partialError }}</p>
+          <ul class="space-y-2">
+            <li v-if="draftRecipient" class="card border-primary bg-primary-mist p-4">
+              <p class="font-medium">{{ draftRecipient.displayName }}</p>
+              <p class="text-xs text-dim">
+                新對話<template v-if="draftRecipient.eventName">・{{ draftRecipient.eventName }}</template>
               </p>
-            </button>
-          </li>
-        </ul>
+            </li>
+            <li v-for="thread in threads" :key="thread.id">
+              <button
+                class="card w-full cursor-pointer p-4 text-left transition-colors duration-150 hover:border-primary"
+                :class="{ '!border-primary bg-primary-mist': thread.id === selectedThreadId }"
+                @click="openThread(thread)"
+              >
+                <p class="font-medium">{{ thread.otherDisplayName }}</p>
+                <!-- which event this conversation belongs to (§5) -->
+                <p class="mt-0.5 truncate text-xs text-primary-deep">{{ thread.eventName }}</p>
+                <p class="mt-0.5 font-mono text-xs text-dim">
+                  {{ formatDateTime(thread.lastMessageAt) }}
+                </p>
+              </button>
+            </li>
+          </ul>
+        </template>
         <div v-else class="card p-6 text-sm text-dim">
           還沒有對話。到{{ eventStore.termTeam }}頁面或申請列表找「傳訊息」按鈕開始。
         </div>
@@ -244,7 +308,10 @@ async function submitReport(reason: string) {
           >
             ←
           </button>
-          <h2 class="font-bold">{{ conversationTitle }}</h2>
+          <div class="min-w-0">
+            <h2 class="font-bold">{{ conversationTitle }}</h2>
+            <p v-if="conversationEvent" class="truncate text-xs text-dim">{{ conversationEvent }}</p>
+          </div>
         </header>
 
         <div class="flex-1 space-y-3 overflow-y-auto px-5 py-4">

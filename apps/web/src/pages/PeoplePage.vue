@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRoute } from 'vue-router'
 import type { PublicParticipantView, TeamDetail } from '@teamup/shared'
 import { api } from '../api/client.js'
 import { classifyLoadError, describeApiError, type LoadFailure } from '../lib/errors.js'
@@ -13,6 +13,8 @@ import { useEventStore } from '../stores/event.js'
 
 const eventStore = useEventStore()
 const auth = useAuthStore()
+const route = useRoute()
+const slug = computed(() => String(route.params.slug))
 
 const people = ref<PublicParticipantView[]>([])
 const loading = ref(true)
@@ -22,15 +24,20 @@ const myTeam = ref<TeamDetail | null>(null)
 async function load() {
   loading.value = true
   loadError.value = null
-  await eventStore.ensureLoaded()
-  const slug = eventStore.event?.slug
-  if (!slug) {
-    loadError.value = 'failed'
+  const detail = await eventStore.ensureLoaded(slug.value)
+  if (!detail) {
+    loadError.value = eventStore.failures[slug.value] ?? 'failed'
+    loading.value = false
+    return
+  }
+  // Draft preview (§3): nobody can have joined a draft, so do not ask.
+  if (eventStore.preview) {
+    people.value = []
     loading.value = false
     return
   }
   try {
-    people.value = (await api.listParticipants(slug)).participants
+    people.value = (await api.listParticipants(slug.value)).participants
   } catch (err) {
     people.value = []
     loadError.value = classifyLoadError(err)
@@ -42,26 +49,24 @@ async function load() {
 // ---- 檢舉 ----
 const reportUserId = ref<string | null>(null)
 async function submitReport(reason: string) {
-  const slug = eventStore.event?.slug
-  if (!auth.token || !slug || !reportUserId.value) return
-  await api.reportParticipant(auth.getToken, slug, reportUserId.value, reason)
+  if (!auth.token || !reportUserId.value) return
+  await api.reportParticipant(auth.getToken, slug.value, reportUserId.value, reason)
 }
 
 async function loadMyTeam() {
-  const slug = eventStore.event?.slug
-  if (!slug || !auth.token || !auth.isLoggedIn) {
+  if (!auth.token || !auth.isLoggedIn || eventStore.preview) {
     myTeam.value = null
     return
   }
   try {
-    myTeam.value = (await api.myTeam(auth.getToken, slug)).team
+    myTeam.value = (await api.myTeam(auth.getToken, slug.value)).team
   } catch {
     myTeam.value = null
   }
 }
 
 onMounted(async () => {
-  await eventStore.ensureLoaded()
+  await eventStore.ensureLoaded(slug.value)
   await Promise.all([load(), loadMyTeam()])
 })
 watch(
@@ -75,7 +80,8 @@ const canInvite = computed(
     !!myTeam.value &&
     myTeam.value.viewerIsOwner &&
     myTeam.value.status === 'recruiting' &&
-    eventStore.recruitOpen,
+    eventStore.recruitOpen &&
+    !eventStore.readOnly,
 )
 
 const inviteOpenFor = ref<string | null>(null)
@@ -120,9 +126,9 @@ async function sendInvite(userId: string) {
       這些人把自己標記為「想找{{ eventStore.termTeam }}」，主動邀請他們吧。
     </p>
 
-    <!-- Why can't I act? Always explain the missing affordance. -->
+    <!-- Why can't I act? Always explain the missing affordance (unless nothing can be done at all). -->
     <div
-      v-if="!canInvite && !loading"
+      v-if="!canInvite && !loading && !eventStore.readOnly"
       class="card mt-4 flex flex-wrap items-center justify-between gap-3 bg-primary-mist px-5 py-4 text-sm"
     >
       <template v-if="!auth.isLoggedIn">
@@ -131,7 +137,11 @@ async function sendInvite(userId: string) {
       </template>
       <template v-else-if="!myTeam">
         <span>想邀請他們？先建立你的{{ eventStore.termTeam }}，邀請按鈕就會出現。</span>
-        <RouterLink :to="{ name: 'teams', query: { create: '1' } }" class="btn btn-cta text-sm">
+        <RouterLink
+          v-if="eventStore.recruitOpen"
+          :to="{ name: 'teams', params: { slug }, query: { create: '1' } }"
+          class="btn btn-cta text-sm"
+        >
           建立{{ eventStore.termTeam }}
         </RouterLink>
       </template>
@@ -153,7 +163,7 @@ async function sendInvite(userId: string) {
         <div class="flex items-start justify-between gap-2">
           <h2 class="font-bold">{{ person.displayName }}</h2>
           <button
-            v-if="auth.isLoggedIn && person.userId !== auth.me?.userId"
+            v-if="auth.isLoggedIn && person.userId !== auth.me?.userId && !eventStore.readOnly"
             class="cursor-pointer text-xs text-dim underline decoration-dotted underline-offset-2 hover:text-danger"
             @click="reportUserId = person.userId"
           >
@@ -222,9 +232,13 @@ async function sendInvite(userId: string) {
       v-else
       class="mt-6"
       :title="`還沒有人在找${eventStore.termTeam}`"
-      :hint="`到個人檔案把自己設成「想找${eventStore.termTeam}」，就會出現在這裡。`"
+      :hint="
+        eventStore.preview
+          ? '草稿尚無資料——開放活動後參加者才能填寫參加資料。'
+          : `到個人檔案把自己設成「想找${eventStore.termTeam}」，就會出現在這裡。`
+      "
     >
-      <template #action>
+      <template v-if="!eventStore.readOnly" #action>
         <RouterLink to="/profile" class="btn btn-primary">編輯我的檔案</RouterLink>
       </template>
     </EmptyState>

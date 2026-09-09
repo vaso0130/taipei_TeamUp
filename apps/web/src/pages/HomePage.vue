@@ -1,20 +1,28 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRoute } from 'vue-router'
 import { useAuthStore } from '../stores/auth.js'
 import { useEventStore } from '../stores/event.js'
+import LoadError from '../components/LoadError.vue'
 import TagChip from '../components/TagChip.vue'
+import NotFoundPage from './NotFoundPage.vue'
 import { formatDate, formatDateTime } from '../lib/format.js'
 
+/**
+ * Event home (`/e/:slug`). The router guard already pointed the store at
+ * this slug; this page only renders the store's state.
+ */
 const store = useEventStore()
 const auth = useAuthStore()
+const route = useRoute()
+const slug = computed(() => String(route.params.slug))
 const event = computed(() => store.event)
 
 /** Creating a team needs a session: send visitors to login first, then on to the form. */
 const createTeamTarget = computed(() =>
   auth.isLoggedIn
-    ? { name: 'teams', query: { create: '1' } }
-    : { name: 'profile', query: { next: 'create-team' } },
+    ? { name: 'teams', params: { slug: slug.value }, query: { create: '1' } }
+    : { name: 'profile', query: { next: 'create-team', event: slug.value } },
 )
 
 const memberRule = computed(() => {
@@ -34,10 +42,15 @@ const steps = computed(() => [
 
 <template>
   <div>
-    <p v-if="store.loading" class="text-dim">載入中⋯</p>
-    <p v-else-if="store.error" class="card bg-danger-mist p-4 text-danger" role="alert">
-      {{ store.error }}
-    </p>
+    <p v-if="store.loading" class="text-dim" aria-live="polite">載入中⋯</p>
+    <!-- unknown slug (or a draft seen by a non-admin, §3): the ordinary 404 -->
+    <NotFoundPage v-else-if="store.notFound" />
+    <LoadError
+      v-else-if="store.error"
+      :kind="store.error"
+      title="活動資料載入失敗"
+      @retry="store.retry(slug)"
+    />
 
     <template v-else-if="event">
       <!-- hero: the platform's single job, stated in the event's own terms -->
@@ -49,13 +62,23 @@ const steps = computed(() => [
         <p class="mt-4 max-w-xl whitespace-pre-line text-dim">{{ event.description }}</p>
 
         <div class="mt-8 flex flex-wrap items-center gap-3">
-          <RouterLink to="/teams" class="btn btn-primary">
+          <RouterLink :to="{ name: 'teams', params: { slug } }" class="btn btn-primary">
             瀏覽{{ event.termTeam }}
           </RouterLink>
-          <RouterLink v-if="store.recruitOpen" :to="createTeamTarget" class="btn btn-cta">
+          <RouterLink v-if="store.recruitOpen && !store.readOnly" :to="createTeamTarget" class="btn btn-cta">
             建立{{ event.termTeam }}
           </RouterLink>
-          <span v-else class="rounded-lg bg-mist px-3 py-2 text-sm text-dim">揪團已截止</span>
+          <!-- lifecycle notices (§4): closed beats "deadline passed"; archived has the shell banner -->
+          <span
+            v-else-if="event.status === 'closed'"
+            class="rounded-lg bg-mist px-3 py-2 text-sm text-dim"
+            role="status"
+          >
+            這場活動已結束招募
+          </span>
+          <span v-else-if="event.status === 'open'" class="rounded-lg bg-mist px-3 py-2 text-sm text-dim">
+            揪團已截止
+          </span>
         </div>
 
         <dl class="mt-10 grid gap-x-8 gap-y-4 font-mono text-sm sm:grid-cols-3">

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRoute } from 'vue-router'
 import type { ApplicationView } from '@teamup/shared'
 import { api } from '../api/client.js'
 import { classifyLoadError, describeApiError, type LoadFailure } from '../lib/errors.js'
@@ -11,6 +11,8 @@ import { useEventStore } from '../stores/event.js'
 
 const eventStore = useEventStore()
 const auth = useAuthStore()
+const route = useRoute()
+const slug = computed(() => String(route.params.slug))
 
 const applications = ref<ApplicationView[]>([])
 const loading = ref(true)
@@ -24,15 +26,20 @@ async function load() {
   }
   loading.value = true
   loadError.value = null
-  await eventStore.ensureLoaded()
-  const slug = eventStore.event?.slug
-  if (!slug || !auth.token) {
-    loadError.value = 'failed'
+  const detail = await eventStore.ensureLoaded(slug.value)
+  if (!detail || !auth.token) {
+    loadError.value = eventStore.failures[slug.value] ?? 'failed'
+    loading.value = false
+    return
+  }
+  // Draft preview (§3): no applications can exist yet.
+  if (eventStore.preview) {
+    applications.value = []
     loading.value = false
     return
   }
   try {
-    applications.value = (await api.myApplications(auth.getToken, slug)).applications
+    applications.value = (await api.myApplications(auth.getToken, slug.value)).applications
   } catch (err) {
     loadError.value = classifyLoadError(err)
   } finally {
@@ -41,7 +48,7 @@ async function load() {
 }
 
 onMounted(async () => {
-  await eventStore.ensureLoaded()
+  await eventStore.ensureLoaded(slug.value)
   await load()
 })
 watch(() => auth.isLoggedIn, load)
@@ -116,7 +123,7 @@ async function withdraw(id: string) {
             <li v-for="a in invitations" :key="a.id" class="card flex flex-wrap items-center justify-between gap-3 p-5">
               <div>
                 <RouterLink
-                  :to="{ name: 'team-detail', params: { id: a.teamId } }"
+                  :to="{ name: 'team-detail', params: { slug, id: a.teamId } }"
                   class="font-bold hover:text-primary-deep"
                 >
                   {{ a.teamName }}
@@ -129,7 +136,7 @@ async function withdraw(id: string) {
                   （附言審核中）
                 </p>
               </div>
-              <div v-if="a.status === 'pending'" class="flex gap-2">
+              <div v-if="a.status === 'pending' && !eventStore.readOnly" class="flex gap-2">
                 <button class="btn btn-primary text-sm" @click="respond(a.id, 'accept')">
                   接受邀請
                 </button>
@@ -146,7 +153,7 @@ async function withdraw(id: string) {
             <li v-for="a in applies" :key="a.id" class="card flex flex-wrap items-center justify-between gap-3 p-5">
               <div>
                 <RouterLink
-                  :to="{ name: 'team-detail', params: { id: a.teamId } }"
+                  :to="{ name: 'team-detail', params: { slug, id: a.teamId } }"
                   class="font-bold hover:text-primary-deep"
                 >
                   {{ a.teamName }}
@@ -157,7 +164,7 @@ async function withdraw(id: string) {
                 <p v-if="a.message" class="mt-1 text-sm text-dim">{{ a.message }}</p>
               </div>
               <button
-                v-if="a.status === 'pending'"
+                v-if="a.status === 'pending' && !eventStore.readOnly"
                 class="btn btn-quiet text-sm"
                 @click="withdraw(a.id)"
               >
@@ -169,10 +176,12 @@ async function withdraw(id: string) {
             v-else
             class="mt-3"
             title="還沒有送出任何申請"
-            :hint="`到「找${eventStore.termTeam}」看看誰在招募。`"
+            :hint="eventStore.preview ? '草稿尚無資料。' : `到「找${eventStore.termTeam}」看看誰在招募。`"
           >
             <template #action>
-              <RouterLink to="/teams" class="btn btn-primary">瀏覽{{ eventStore.termTeam }}</RouterLink>
+              <RouterLink :to="{ name: 'teams', params: { slug } }" class="btn btn-primary">
+                瀏覽{{ eventStore.termTeam }}
+              </RouterLink>
             </template>
           </EmptyState>
         </section>

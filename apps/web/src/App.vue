@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 import RealDarkMode from './components/RealDarkMode.vue'
 import {
@@ -8,12 +8,34 @@ import {
   resolveDark,
   type ThemePreference,
 } from './lib/theme.js'
+import { routeSlug } from './router.js'
 import { useAuthStore } from './stores/auth.js'
 import { useEventStore } from './stores/event.js'
 
 const eventStore = useEventStore()
 const auth = useAuthStore()
 const route = useRoute()
+
+// ---- event layer (docs/design/landing-and-event-layer.md §2) ----
+const slug = computed(() => routeSlug(route))
+const inEventLayer = computed(() => slug.value !== null)
+/** Event name shown under the brand as "where you are"; falls back while loading. */
+const eventLabel = computed(() => (inEventLayer.value ? eventStore.event?.name ?? '' : ''))
+
+// Drafts are admin-only: a 404 seen before the session was restored gets a
+// second chance once we know the visitor is an admin; logging out forgets them.
+watch(
+  () => auth.me?.isAdmin,
+  (isAdmin) => {
+    if (isAdmin && eventStore.notFound && eventStore.current) void eventStore.retry(eventStore.current)
+  },
+)
+watch(
+  () => auth.isLoggedIn,
+  (loggedIn) => {
+    if (!loggedIn) eventStore.dropDrafts()
+  },
+)
 
 // ---- dark mode toggle（第一次按是陷阱） ----
 const realDark = ref(false) // the flashlight prank overlay
@@ -130,7 +152,6 @@ function onSystemThemeChange() {
 
 onMounted(() => {
   auth.init()
-  void eventStore.ensureLoaded()
   window.addEventListener('keydown', onKeydown)
   setTheme(readThemePreference())
   systemDark?.addEventListener('change', onSystemThemeChange)
@@ -140,12 +161,18 @@ onBeforeUnmount(() => {
   systemDark?.removeEventListener('change', onSystemThemeChange)
 })
 
-const navItems = [
-  { to: '/teams', label: '找團' },
-  { to: '/people', label: '找人' },
-  { to: '/applications', label: '申請' },
-  { to: '/messages', label: '訊息' },
-]
+/** Inside an event: its pages (with slug). Outside — or on an unknown slug — back to the event list. */
+const navItems = computed(() => {
+  const s = eventStore.notFound ? null : slug.value
+  const eventNav = s
+    ? [
+        { key: 'teams', to: { name: 'teams', params: { slug: s } }, label: '找團' },
+        { key: 'people', to: { name: 'people', params: { slug: s } }, label: '找人' },
+        { key: 'applications', to: { name: 'applications', params: { slug: s } }, label: '申請' },
+      ]
+    : [{ key: 'events', to: { name: 'home' }, label: '活動' }]
+  return [...eventNav, { key: 'messages', to: { name: 'messages' }, label: '訊息' }]
+})
 </script>
 
 <template>
@@ -169,7 +196,16 @@ const navItems = [
           </span>
           <span class="hidden flex-col leading-tight sm:flex">
             <span class="font-bold">台北配</span>
-            <span class="text-xs text-dim">配.taipei</span>
+            <!-- "where you are": the event name replaces the domain inside an event -->
+            <span
+              v-if="eventLabel"
+              class="max-w-[10rem] truncate text-xs text-dim"
+              data-testid="header-event-name"
+              :title="eventLabel"
+            >
+              {{ eventLabel }}
+            </span>
+            <span v-else class="text-xs text-dim">配.taipei</span>
           </span>
         </RouterLink>
 
@@ -179,7 +215,7 @@ const navItems = [
         >
           <RouterLink
             v-for="item in navItems"
-            :key="item.to"
+            :key="item.key"
             :to="item.to"
             class="nav-link shrink-0 sm:px-3"
             active-class="nav-link-active"
@@ -261,6 +297,35 @@ const navItems = [
         </nav>
       </div>
     </header>
+
+    <!-- draft preview (admins only, §3): sticky so the state is never out of view -->
+    <div
+      v-if="inEventLayer && eventStore.preview"
+      class="sticky top-0 z-30 border-b border-warn/30 bg-warn-mist text-warn"
+      role="status"
+    >
+      <div class="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 py-2 text-sm">
+        <p>
+          <strong class="font-semibold">草稿預覽</strong>
+          <span class="ml-2">只有管理員看得到；開放後才會出現在活動列表。</span>
+        </p>
+        <RouterLink
+          :to="{ name: 'admin-event-edit', params: { slug: slug! } }"
+          class="inline-flex min-h-[44px] items-center font-medium underline decoration-dotted underline-offset-2"
+        >
+          回編輯器
+        </RouterLink>
+      </div>
+    </div>
+
+    <!-- archived: readable by direct link, nothing can be changed (§4) -->
+    <div
+      v-else-if="inEventLayer && eventStore.archived"
+      class="border-b border-line bg-mist text-dim"
+      role="status"
+    >
+      <p class="mx-auto max-w-5xl px-4 py-2 text-sm">這場活動已封存，僅供瀏覽。</p>
+    </div>
 
     <!-- Editor-style pages (route meta `wide`) get a three-column-friendly width. -->
     <main class="mx-auto w-full flex-1 px-4 py-8" :class="route.meta.wide ? 'max-w-7xl' : 'max-w-5xl'">
