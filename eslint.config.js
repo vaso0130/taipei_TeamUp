@@ -21,6 +21,13 @@ export default tseslint.config(
     },
   },
   {
+    // Node-only deployment helpers
+    files: ['deploy/**/*.mjs'],
+    languageOptions: {
+      globals: { process: 'readonly', console: 'readonly' },
+    },
+  },
+  {
     rules: {
       // User-generated content must never be rendered as HTML (spec §8)
       'vue/no-v-html': 'error',

@@ -48,6 +48,8 @@ docs/deployment.local.md
 # Firebase CLI local state
 .firebase/
 firebase-debug.log
+# Rendered from firebase.json by deploy/render-firebase-config.mjs (contains the API origin)
+firebase.deploy.json
 
 # Local agent tooling (third-party skills and their generated output)
 .claude/
