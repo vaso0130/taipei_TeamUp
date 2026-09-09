@@ -611,10 +611,8 @@ export function useEventEditor(options: EditorOptions) {
       baseline.value = candidateJson.value // nothing left to protect with the leave guard
       return true
     } catch (err) {
-      statusError.value = describeApiError(err, { termTeam: termTeam.value }, '刪除失敗，請稍後再試', {
-        // DELETE on a non-draft comes back as a transition to "deleted".
-        invalid_status_transition: '只有草稿可以刪除；其他狀態請改走關閉與封存。',
-      })
+      // `event_not_empty` (teams/participants exist) is covered by describeApiError.
+      statusError.value = describeApiError(err, { termTeam: termTeam.value }, '刪除失敗，請稍後再試')
       return false
     } finally {
       statusBusy.value = false

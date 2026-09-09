@@ -1,15 +1,21 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
-import type { AdminEventSummary, EventTemplate } from '@teamup/shared'
+import type { AdminEventSummary, EventStatus, EventTemplate } from '@teamup/shared'
 import { api, ApiError } from '../api/client.js'
+import AdminEventCard from '../components/admin/AdminEventCard.vue'
 import AdminGate from '../components/admin/AdminGate.vue'
 import EventStartOptions from '../components/admin/EventStartOptions.vue'
-import EventStatusBadge from '../components/admin/EventStatusBadge.vue'
 import LoadError from '../components/LoadError.vue'
+import ModalShell from '../components/ModalShell.vue'
 import { classifyLoadError, describeApiError, isReadOnlyMode, type LoadFailure } from '../lib/errors.js'
-import { EVENT_STATUS_BAR, EVENT_STATUS_ORDER } from '../lib/event-status.js'
-import { formatDate, formatDateTime } from '../lib/format.js'
+import {
+  EVENT_DELETE_DIALOG,
+  EVENT_STATUS_ORDER,
+  statusChangeAnnouncement,
+  statusDialogCopy,
+  type ConfirmCopy,
+} from '../lib/event-status.js'
 import { downloadBlob } from '../lib/download.js'
 import { useAuthStore } from '../stores/auth.js'
 
@@ -22,6 +28,8 @@ const loadError = ref<LoadFailure | null>(null)
 const forbidden = ref(false)
 const showArchived = ref(false)
 const feedback = ref('')
+/** Polite confirmation after a lifecycle action ("「x」已停止招募"). */
+const announcement = ref('')
 
 const templates = ref<EventTemplate[] | null>(null)
 const templatesError = ref<string | null>(null)
@@ -77,6 +85,7 @@ watch(
   },
 )
 
+// ---- export ----
 const exporting = ref<string | null>(null)
 async function exportJson(e: AdminEventSummary) {
   exporting.value = e.slug
@@ -88,6 +97,74 @@ async function exportJson(e: AdminEventSummary) {
     feedback.value = describeApiError(err, { termTeam: e.termTeam }, '匯出失敗，請稍後再試')
   } finally {
     exporting.value = null
+  }
+}
+
+// ---- lifecycle actions (same copy as the editor's status card) ----
+type PendingAction =
+  | { kind: 'status'; event: AdminEventSummary; to: EventStatus }
+  | { kind: 'delete'; event: AdminEventSummary }
+
+const pending = ref<PendingAction | null>(null)
+const actionBusy = ref(false)
+const actionError = ref<string | null>(null)
+/** Missing items from `cannot_open_incomplete`; null = nothing to show. */
+const openChecklist = ref<string[] | null>(null)
+
+const dialog = computed<ConfirmCopy | null>(() => {
+  const p = pending.value
+  if (!p) return null
+  if (p.kind === 'delete') return EVENT_DELETE_DIALOG
+  return statusDialogCopy(p.event.status, p.to, p.event.termTeam)
+})
+const blockedByChecklist = computed(
+  () => pending.value?.kind === 'status' && pending.value.to === 'open' && (openChecklist.value?.length ?? 0) > 0,
+)
+/** The card whose request is in flight (disables just that card's buttons). */
+const busySlug = computed(() => (actionBusy.value && pending.value ? pending.value.event.slug : null))
+
+function requestStatus(event: AdminEventSummary, to: EventStatus) {
+  actionError.value = null
+  openChecklist.value = null
+  pending.value = { kind: 'status', event, to }
+}
+function requestDelete(event: AdminEventSummary) {
+  actionError.value = null
+  openChecklist.value = null
+  pending.value = { kind: 'delete', event }
+}
+function closeDialog() {
+  if (actionBusy.value) return
+  pending.value = null
+  actionError.value = null
+  openChecklist.value = null
+}
+
+async function confirmAction() {
+  const p = pending.value
+  if (!p || blockedByChecklist.value) return
+  actionBusy.value = true
+  actionError.value = null
+  announcement.value = ''
+  try {
+    if (p.kind === 'delete') {
+      await api.adminDeleteEvent(auth.getToken, p.event.slug)
+      announcement.value = `「${p.event.name || p.event.slug}」已刪除`
+    } else {
+      await api.adminSetEventStatus(auth.getToken, p.event.slug, p.to)
+      announcement.value = `「${p.event.name || p.event.slug}」${statusChangeAnnouncement(p.event.status, p.to)}`
+    }
+    pending.value = null
+    await load()
+  } catch (err) {
+    if (err instanceof ApiError && err.code === 'cannot_open_incomplete') {
+      const details = Array.isArray(err.body.details) ? (err.body.details as string[]) : []
+      openChecklist.value = details.length ? details : ['活動設定尚未完整']
+    } else {
+      actionError.value = describeApiError(err, { termTeam: p.event.termTeam }, '操作失敗，請稍後再試')
+    }
+  } finally {
+    actionBusy.value = false
   }
 }
 
@@ -117,6 +194,9 @@ function onChoose(start: { kind: 'template'; key: string } | { kind: 'copy'; slu
 
     <AdminGate :forbidden="forbidden">
       <p v-if="feedback" class="mt-4 text-sm text-danger" role="alert">{{ feedback }}</p>
+      <p v-if="announcement" class="mt-4 rounded-lg bg-ok-mist px-4 py-3 text-sm text-ok" role="status" aria-live="polite">
+        {{ announcement }}
+      </p>
       <p v-if="loading && items.length === 0" class="mt-6 text-dim">載入中⋯</p>
 
       <LoadError
@@ -134,7 +214,7 @@ function onChoose(start: { kind: 'template'; key: string } | { kind: 'copy'; slu
           <p class="eyebrow">還沒有任何活動</p>
           <h2 id="first-event-title" class="mt-2 text-2xl font-black">建立第一場活動</h2>
           <p class="mt-2 max-w-xl text-dim">
-            選一個起點就能開始。存成草稿後隨時能回來補，最後按「開放」才會出現在首頁。
+            選一個起點就能開始。存成草稿後隨時能回來補，最後按「開放招募」才會出現在活動列表。
           </p>
           <EventStartOptions
             class="mt-6"
@@ -148,56 +228,16 @@ function onChoose(start: { kind: 'template'; key: string } | { kind: 'copy'; slu
 
       <template v-else>
         <ul class="mt-6 space-y-3">
-          <li v-for="e in visible" :key="e.slug" class="card overflow-hidden">
-            <div class="h-1.5" :style="{ backgroundColor: EVENT_STATUS_BAR[e.status] }" aria-hidden="true"></div>
-            <div class="p-5">
-              <div class="flex flex-wrap items-center gap-2">
-                <EventStatusBadge :status="e.status" />
-                <h2 class="text-lg font-bold">{{ e.name || '未命名活動' }}</h2>
-              </div>
-              <p class="mt-1 font-mono text-xs text-dim">{{ e.slug }}</p>
-
-              <dl class="mt-4 grid gap-x-8 gap-y-3 font-mono text-sm sm:grid-cols-3">
-                <div>
-                  <dt class="text-xs text-dim">活動日期</dt>
-                  <dd class="mt-0.5 font-semibold">{{ formatDate(e.startsAt) }} – {{ formatDate(e.endsAt) }}</dd>
-                </div>
-                <div>
-                  <dt class="text-xs text-dim">招募截止</dt>
-                  <dd class="mt-0.5 font-semibold">{{ formatDateTime(e.recruitClosesAt) }}</dd>
-                </div>
-                <div>
-                  <dt class="text-xs text-dim">規模</dt>
-                  <dd class="mt-0.5 font-semibold">
-                    {{ e.termTeam }} {{ e.counts.teams }}・參加者 {{ e.counts.participants }}
-                  </dd>
-                </div>
-              </dl>
-
-              <div class="mt-4 flex flex-wrap gap-2">
-                <RouterLink
-                  :to="{ name: 'admin-event-edit', params: { slug: e.slug } }"
-                  class="btn btn-primary"
-                >
-                  編輯
-                </RouterLink>
-                <RouterLink
-                  :to="{ name: 'admin-event-new', query: { start: 'copy', slug: e.slug } }"
-                  class="btn btn-quiet"
-                >
-                  複製為新活動
-                </RouterLink>
-                <button
-                  type="button"
-                  class="btn btn-quiet"
-                  :disabled="exporting === e.slug"
-                  @click="exportJson(e)"
-                >
-                  {{ exporting === e.slug ? '匯出中⋯' : '匯出 JSON' }}
-                </button>
-              </div>
-            </div>
-          </li>
+          <AdminEventCard
+            v-for="e in visible"
+            :key="e.slug"
+            :event="e"
+            :busy="busySlug === e.slug"
+            :exporting="exporting === e.slug"
+            @status="requestStatus(e, $event)"
+            @delete="requestDelete(e)"
+            @export="exportJson(e)"
+          />
         </ul>
 
         <div v-if="archived.length" class="mt-6">
@@ -211,36 +251,66 @@ function onChoose(start: { kind: 'template'; key: string } | { kind: 'copy'; slu
             {{ showArchived ? '隱藏已封存' : '顯示已封存' }}（{{ archived.length }}）
           </button>
           <ul v-if="showArchived" id="archived-events" class="mt-3 space-y-3">
-            <li v-for="e in archived" :key="e.slug" class="card overflow-hidden opacity-80">
-              <div class="h-1.5" :style="{ backgroundColor: EVENT_STATUS_BAR[e.status] }" aria-hidden="true"></div>
-              <div class="p-5">
-                <div class="flex flex-wrap items-center gap-2">
-                  <EventStatusBadge :status="e.status" />
-                  <h2 class="text-lg font-bold">{{ e.name }}</h2>
-                </div>
-                <p class="mt-1 font-mono text-xs text-dim">{{ e.slug }}</p>
-                <p class="mt-3 font-mono text-sm text-dim">
-                  {{ formatDate(e.startsAt) }} – {{ formatDate(e.endsAt) }}・{{ e.termTeam }} {{ e.counts.teams }}・參加者 {{ e.counts.participants }}
-                </p>
-                <div class="mt-4 flex flex-wrap gap-2">
-                  <RouterLink :to="{ name: 'admin-event-edit', params: { slug: e.slug } }" class="btn btn-quiet">
-                    檢視
-                  </RouterLink>
-                  <RouterLink
-                    :to="{ name: 'admin-event-new', query: { start: 'copy', slug: e.slug } }"
-                    class="btn btn-quiet"
-                  >
-                    複製為新活動
-                  </RouterLink>
-                  <button type="button" class="btn btn-quiet" :disabled="exporting === e.slug" @click="exportJson(e)">
-                    {{ exporting === e.slug ? '匯出中⋯' : '匯出 JSON' }}
-                  </button>
-                </div>
-              </div>
-            </li>
+            <AdminEventCard
+              v-for="e in archived"
+              :key="e.slug"
+              :event="e"
+              :busy="busySlug === e.slug"
+              :exporting="exporting === e.slug"
+              @status="requestStatus(e, $event)"
+              @delete="requestDelete(e)"
+              @export="exportJson(e)"
+            />
           </ul>
         </div>
       </template>
     </AdminGate>
+
+    <!-- one confirmation dialog for every lifecycle action -->
+    <ModalShell :open="pending !== null && dialog !== null" labelledby="list-action-title" @close="closeDialog">
+      <template v-if="pending && dialog">
+        <h2 id="list-action-title" class="text-lg font-bold">{{ dialog.title }}</h2>
+        <p class="mt-1 font-mono text-xs text-dim">{{ pending.event.name || pending.event.slug }}</p>
+        <p class="mt-2 text-sm text-dim">{{ dialog.body }}</p>
+
+        <div
+          v-if="blockedByChecklist"
+          class="mt-3 rounded-lg bg-danger-mist px-4 py-3 text-sm text-danger"
+          role="alert"
+        >
+          <p class="font-medium">開放前還缺：</p>
+          <ul class="mt-1 list-disc space-y-0.5 pl-5">
+            <li v-for="(item, i) in openChecklist" :key="i">{{ item }}</li>
+          </ul>
+          <p class="mt-2">
+            <RouterLink
+              :to="{ name: 'admin-event-edit', params: { slug: pending.event.slug } }"
+              class="underline underline-offset-2"
+            >
+              到編輯器補齊
+            </RouterLink>
+            後再開放。
+          </p>
+        </div>
+        <p v-else-if="actionError" class="mt-3 rounded-lg bg-danger-mist px-4 py-3 text-sm text-danger" role="alert">
+          {{ actionError }}
+        </p>
+
+        <div class="mt-5 flex flex-wrap justify-end gap-2">
+          <button type="button" class="btn btn-quiet" data-autofocus :disabled="actionBusy" @click="closeDialog">
+            取消
+          </button>
+          <button
+            type="button"
+            class="btn"
+            :class="dialog.danger ? 'btn-danger' : 'btn-primary'"
+            :disabled="actionBusy || blockedByChecklist"
+            @click="confirmAction"
+          >
+            {{ actionBusy ? '處理中⋯' : dialog.confirm }}
+          </button>
+        </div>
+      </template>
+    </ModalShell>
   </div>
 </template>

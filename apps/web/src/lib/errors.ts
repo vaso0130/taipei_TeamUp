@@ -69,7 +69,7 @@ export function describeApiError(
     case 'invalid_status_transition':
       return '目前狀態不能直接變成這個狀態'
     case 'event_not_empty':
-      return `已有參加者或${ctx.termTeam}，無法刪除`
+      return `已有參加者或${ctx.termTeam}，無法刪除；只能封存`
     case 'event_not_found':
       return '找不到這場活動'
     case 'read_only_mode':

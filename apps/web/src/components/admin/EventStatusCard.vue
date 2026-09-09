@@ -2,9 +2,14 @@
 import { computed, ref, watch } from 'vue'
 import { EVENT_STATUS_TRANSITIONS, type AdminEventStats, type EventStatus } from '@teamup/shared'
 import {
+  EVENT_DELETE_DIALOG,
+  EVENT_DELETE_LABEL,
+  EVENT_REOPEN_LABEL,
   EVENT_STATUS_ACTION_LABEL,
-  EVENT_STATUS_LABEL,
+  EVENT_STATUS_DESCRIPTION,
   EVENT_STATUS_NEXT,
+  cannotDeleteHint,
+  statusDialogCopy,
 } from '../../lib/event-status.js'
 import ModalShell from '../ModalShell.vue'
 import EventStatusBadge from './EventStatusBadge.vue'
@@ -12,7 +17,8 @@ import EventStatusBadge from './EventStatusBadge.vue'
 /**
  * Section ⑧: current state, what participants see, one primary next step,
  * secondary actions as text links, confirmation dialogs (ModalShell) with
- * the server-side open checklist when opening is refused.
+ * the server-side open checklist when opening is refused. Copy lives in
+ * lib/event-status.ts so the list page shows the very same words.
  */
 const props = defineProps<{
   status: EventStatus
@@ -26,17 +32,10 @@ const props = defineProps<{
   /** Items the server reported missing for draft → open. */
   openChecklist: string[] | null
   stats: AdminEventStats | null
-  /** Draft with no participants/teams. */
+  /** No participants and no teams — deletable in any status (ADR-035). */
   canDelete: boolean
 }>()
 const emit = defineEmits<{ change: [to: EventStatus]; delete: [] }>()
-
-const DESCRIPTION = computed<Record<EventStatus, string>>(() => ({
-  draft: '草稿對外不可見。開放後會出現在首頁，參加者可以填資料、開團。',
-  open: '參加者可以開團、申請、傳訊息。',
-  closed: '不能開團與申請；資料依保存天數清除。',
-  archived: '已封存。從所有列表消失，直接連結仍可讀。',
-}))
 
 const next = computed(() => EVENT_STATUS_NEXT[props.status])
 const primaryLabel = computed(() => EVENT_STATUS_ACTION_LABEL[props.status])
@@ -61,43 +60,9 @@ watch(
   },
 )
 
-const dialog = computed(() => {
-  const to = pending.value
-  const t = props.termTeam
-  if (to === 'open' && props.status === 'draft') {
-    return {
-      title: '開放活動',
-      body: '開放後會出現在首頁，參加者可以填資料、開團。系統會先檢查：名稱、三個時間有效、招募截止在未來、人數規則、至少一個角色與一個技能。',
-      confirm: '確認開放',
-      danger: false,
-    }
-  }
-  if (to === 'open') {
-    return {
-      title: '重新開放活動',
-      body: `重新開放後參加者又可以開團、申請與傳訊息；既有${t}維持不變。`,
-      confirm: '重新開放',
-      danger: false,
-    }
-  }
-  if (to === 'closed') {
-    return {
-      title: '關閉招募與活動',
-      body: `關閉後不能再開團與申請，既有${t}與訊息仍可見；可以重新開放。`,
-      confirm: '確認關閉',
-      danger: false,
-    }
-  }
-  if (to === 'archived') {
-    return {
-      title: '封存活動',
-      body: '封存後從所有列表消失，直接連結仍可讀。此動作不可逆。',
-      confirm: '確認封存',
-      danger: true,
-    }
-  }
-  return null
-})
+const dialog = computed(() =>
+  pending.value ? statusDialogCopy(props.status, pending.value, props.termTeam) : null,
+)
 
 const blockedByChecklist = computed(() => pending.value === 'open' && (props.openChecklist?.length ?? 0) > 0)
 
@@ -123,7 +88,7 @@ function confirm() {
         {{ termTeam }} {{ stats.teams }}・參加者 {{ stats.participants }}
       </p>
     </div>
-    <p class="mt-3 text-sm">{{ DESCRIPTION[status] }}</p>
+    <p class="mt-3 text-sm">{{ EVENT_STATUS_DESCRIPTION[status] }}</p>
 
     <p v-if="publicHref && publicLinkLabel" class="mt-3">
       <a :href="publicHref" target="_blank" rel="noopener" class="btn btn-quiet text-sm">
@@ -154,13 +119,13 @@ function confirm() {
         :disabled="dirty || busy"
         @click="request('open')"
       >
-        重新開放
+        {{ EVENT_REOPEN_LABEL }}
       </button>
       <p v-if="dirty" id="status-dirty-hint" class="text-sm text-warn">先儲存變更，才能變更狀態。</p>
     </div>
 
-    <!-- delete: drafts with no data only (§6) -->
-    <div v-if="status === 'draft'" class="mt-6 border-t border-line pt-4">
+    <!-- delete: any status, as long as nobody has joined or formed a team (ADR-035) -->
+    <div class="mt-6 border-t border-line pt-4">
       <button
         v-if="canDelete"
         type="button"
@@ -168,9 +133,10 @@ function confirm() {
         :disabled="busy"
         @click="confirmingDelete = true"
       >
-        刪除這場活動
+        {{ EVENT_DELETE_LABEL }}
       </button>
-      <p v-else class="text-sm text-dim">已有參加者或{{ termTeam }}，無法刪除；請改走關閉與封存。</p>
+      <p v-else-if="status !== 'archived'" class="text-sm text-dim">{{ cannotDeleteHint(termTeam) }}。</p>
+      <p v-else class="text-sm text-dim">{{ cannotDeleteHint(termTeam) }}；已封存的活動不再提供其他動作。</p>
     </div>
 
     <!-- transition confirmation -->
@@ -206,14 +172,12 @@ function confirm() {
 
     <!-- delete confirmation -->
     <ModalShell :open="confirmingDelete" labelledby="delete-dialog-title" @close="confirmingDelete = false">
-      <h2 id="delete-dialog-title" class="text-lg font-bold">刪除這場活動？</h2>
-      <p class="mt-2 text-sm text-dim">
-        只有仍是{{ EVENT_STATUS_LABEL.draft }}、且沒有任何參加者或{{ termTeam }}的活動可以刪除。刪除後無法復原。
-      </p>
+      <h2 id="delete-dialog-title" class="text-lg font-bold">{{ EVENT_DELETE_DIALOG.title }}</h2>
+      <p class="mt-2 text-sm text-dim">{{ EVENT_DELETE_DIALOG.body }}</p>
       <div class="mt-5 flex flex-wrap justify-end gap-2">
         <button type="button" class="btn btn-quiet" data-autofocus @click="confirmingDelete = false">取消</button>
         <button type="button" class="btn btn-danger" :disabled="busy" @click="emit('delete')">
-          {{ busy ? '處理中⋯' : '確認刪除' }}
+          {{ busy ? '處理中⋯' : EVENT_DELETE_DIALOG.confirm }}
         </button>
       </div>
     </ModalShell>

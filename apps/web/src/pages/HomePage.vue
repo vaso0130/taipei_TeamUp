@@ -6,6 +6,7 @@ import { useEventStore } from '../stores/event.js'
 import LoadError from '../components/LoadError.vue'
 import TagChip from '../components/TagChip.vue'
 import NotFoundPage from './NotFoundPage.vue'
+import { hasEnded } from '../lib/event-status.js'
 import { formatDate, formatDateTime } from '../lib/format.js'
 
 /**
@@ -74,7 +75,7 @@ const steps = computed(() => [
             class="rounded-lg bg-mist px-3 py-2 text-sm text-dim"
             role="status"
           >
-            這場活動已結束招募
+            {{ hasEnded(event.endsAt) ? '這場活動已結束' : '這場活動已停止招募' }}
           </span>
           <span v-else-if="event.status === 'open'" class="rounded-lg bg-mist px-3 py-2 text-sm text-dim">
             揪團已截止

@@ -2,15 +2,17 @@
 /**
  * Event list under the hero (docs/design/landing-and-event-layer.md §1).
  * Open events sorted by recruiting deadline (soonest first); closed ones
- * collapsed, most recently ended first; archived never shown. A single open
- * event still renders as a list — the visitor is meant to step in — just
- * at full width.
+ * collapsed, most recently ended first; archived never reaches this list
+ * (the public API omits it and the filter below only admits open/closed).
+ * A single open event still renders as a list — the visitor is meant to
+ * step in — just at full width.
  */
 import { computed, ref } from 'vue'
 import type { EventSummary } from '@teamup/shared'
 import EmptyState from '../EmptyState.vue'
 import LoadError from '../LoadError.vue'
 import type { LoadFailure } from '../../lib/errors.js'
+import { hasEnded } from '../../lib/event-status.js'
 import EventCard from './EventCard.vue'
 
 const props = defineProps<{
@@ -31,6 +33,10 @@ const closed = computed(() =>
   props.events.filter((e) => e.status === 'closed').sort((a, b) => time(b.endsAt) - time(a.endsAt)),
 )
 const closedShown = ref(false)
+/** "closed" covers both stopped-recruiting and over; name the group by what it actually holds. */
+const closedTitle = computed(() =>
+  closed.value.every((e) => hasEnded(e.endsAt)) ? '已結束的活動' : '已停止招募或已結束的活動',
+)
 </script>
 
 <template>
@@ -66,7 +72,7 @@ const closedShown = ref(false)
       />
 
       <section v-if="closed.length" class="mt-8">
-        <h3 class="sr-only">已結束的活動</h3>
+        <h3 class="sr-only">{{ closedTitle }}</h3>
         <button
           type="button"
           class="closed-toggle"
@@ -87,7 +93,7 @@ const closedShown = ref(false)
           >
             <path d="M9 6l6 6-6 6" />
           </svg>
-          已結束的活動（{{ closed.length }}）
+          {{ closedTitle }}（{{ closed.length }}）
         </button>
         <ul v-show="closedShown" id="closed-events" class="mt-4 grid gap-4 sm:grid-cols-2">
           <li v-for="e in closed" :key="e.slug">

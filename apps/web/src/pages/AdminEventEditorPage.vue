@@ -26,7 +26,7 @@ import {
 } from '../composables/useEventEditor.js'
 import { downloadBlob } from '../lib/download.js'
 import { classifyLoadError, describeApiError, isReadOnlyMode, type LoadFailure } from '../lib/errors.js'
-import { EVENT_STATUS_ACTION_LABEL, EVENT_STATUS_LABEL, EVENT_STATUS_NEXT } from '../lib/event-status.js'
+import { EVENT_STATUS_ACTION_LABEL, EVENT_STATUS_NEXT, statusChangeAnnouncement } from '../lib/event-status.js'
 import { daysBetween, formatTaipeiShort, taipeiLocalToIso, weekdayLabel } from '../lib/taipei-time.js'
 import { useAuthStore } from '../stores/auth.js'
 
@@ -173,6 +173,8 @@ const showSummary = computed(
 )
 
 async function onSave() {
+  // A stale "狀態已變更為…" must not outlive the next save (ADR-035 known gap).
+  announcement.value = ''
   const result = await editor.save()
   if (result === 'saved') {
     if (props.mode === 'create' && editor.savedSlug.value) {
@@ -210,8 +212,10 @@ const nextStatusLabel = computed(() => EVENT_STATUS_ACTION_LABEL[form.status])
 const announcement = ref('')
 
 async function onStatusChange(to: EventStatus) {
+  const from = form.status
+  announcement.value = ''
   const ok = await editor.changeStatus(to)
-  if (ok) announcement.value = `狀態已變更為${EVENT_STATUS_LABEL[to]}`
+  if (ok) announcement.value = `狀態已變更：${statusChangeAnnouncement(from, to)}`
 }
 
 async function onDelete() {
@@ -238,9 +242,10 @@ async function exportJson() {
   }
 }
 
+/** Any status may be deleted as long as nobody has joined or formed a team (ADR-035). */
 const canDelete = computed(() => {
   const s = editor.stats.value
-  return form.status === 'draft' && (!s || (s.teams === 0 && s.participants === 0))
+  return s !== null && s.teams === 0 && s.participants === 0
 })
 
 // ---- field helpers ----

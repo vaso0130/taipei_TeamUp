@@ -32,8 +32,9 @@ const TEMPLATE_DESCRIPTION_CHARS = 80
 export type EventAdminErrorExtra =
   | { current: number }
   | { key: string; count: number }
-  | { from: EventStatus; to: EventStatus | 'deleted' }
+  | { from: EventStatus; to: EventStatus }
   | { details: string[] }
+  | { teams: number; participants: number }
   | Record<string, never>
 
 export class EventAdminError extends Error {
@@ -360,18 +361,15 @@ export class EventAdminService {
     return EventSeedSchema.parse(seed)
   }
 
-  /** Only an empty draft may be deleted; everything else is archived instead. */
+  /**
+   * Delete an event in any status as long as nobody has touched it: no
+   * teams, no participants (ADR-035). Anything with data is archived instead.
+   */
   async delete(slug: string, adminUserId: string): Promise<void> {
-    const { seed } = await this.require(slug)
-    if (seed.event.status !== 'draft') {
-      throw new EventAdminError(ADMIN_EVENT_ERRORS.invalidStatusTransition, {
-        from: seed.event.status,
-        to: 'deleted',
-      })
-    }
+    await this.require(slug)
     const counts = await this.counts(slug)
     if (counts.teams > 0 || counts.participants > 0) {
-      throw new EventAdminError(ADMIN_EVENT_ERRORS.eventNotEmpty)
+      throw new EventAdminError(ADMIN_EVENT_ERRORS.eventNotEmpty, counts)
     }
     await this.deps.events.delete(slug)
     await this.deps.audit.log('admin_event_delete', {

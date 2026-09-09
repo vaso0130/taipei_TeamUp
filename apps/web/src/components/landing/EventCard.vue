@@ -2,11 +2,13 @@
 /**
  * One event as a signboard card. The whole card is the link into the event.
  * Status wording comes from the summary data alone: open → 招募中 until
- * recruitClosesAt passes (招募已截止); closed → 已結束.
+ * recruitClosesAt passes (招募已截止); closed → 已結束 once endsAt has
+ * passed, otherwise 已停止招募 (the event itself may still lie ahead).
  */
 import { computed } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import type { EventSummary } from '@teamup/shared'
+import { publicClosedLabel } from '../../lib/event-status.js'
 import { formatDate, formatDateTime } from '../../lib/format.js'
 
 const props = defineProps<{
@@ -26,7 +28,7 @@ const to = computed(() =>
 
 const status = computed(() => {
   if (props.event.status === 'closed') {
-    return { label: '已結束', badge: 'text-dim bg-mist', bar: 'var(--color-dim)' }
+    return { label: publicClosedLabel(props.event.endsAt), badge: 'text-dim bg-mist', bar: 'var(--color-dim)' }
   }
   if (new Date(props.event.recruitClosesAt).getTime() <= Date.now()) {
     return { label: '招募已截止', badge: 'text-dim bg-mist', bar: 'var(--color-dim)' }

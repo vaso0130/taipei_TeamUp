@@ -418,14 +418,32 @@ describe('delete', () => {
     expect(auditActions()).toContain('admin_event_delete')
   })
 
-  it('refuses non-drafts and drafts with data', async () => {
-    const open = await adminReq(`/${SLUG}`, { method: 'DELETE' })
-    expect(open.status).toBe(409)
-    expect(((await open.json()) as { error: string }).error).toBe(
-      ADMIN_EVENT_ERRORS.invalidStatusTransition,
-    )
+  it('removes an empty event in any status — an open demo with no data included', async () => {
+    for (const status of EVENT_STATUSES) {
+      const slug = `empty-${status}`
+      await createDraft(slug)
+      await t.eventAdminRepo.setStatus(slug, status)
+      const res = await adminReq(`/${slug}`, { method: 'DELETE' })
+      expect(res.status, status).toBe(204)
+      expect((await adminReq(`/${slug}`)).status).toBe(404)
+      expect((await t.app.request(`/api/events/${slug}`)).status).toBe(404)
+    }
+    expect(auditActions().filter((a) => a === 'admin_event_delete')).toHaveLength(EVENT_STATUSES.length)
+  })
 
-    // A draft that once had participants (data written while open, then reverted in the store).
+  it('refuses any event with participants or teams, reporting the counts', async () => {
+    // The fixture is open with data: one team (whose owner is also a participant) + one solo participant.
+    await createTeam('owner@example.com', '不可刪除隊')
+    await putParticipation('solo@example.com', [], [])
+    const withData = await adminReq(`/${SLUG}`, { method: 'DELETE' })
+    expect(withData.status).toBe(409)
+    expect(await withData.json()).toEqual({
+      error: ADMIN_EVENT_ERRORS.eventNotEmpty,
+      teams: 1,
+      participants: 2,
+    })
+
+    // Status does not matter: a draft that once had a participant is still not empty.
     await createDraft('had-people')
     await t.eventAdminRepo.setStatus('had-people', 'open')
     const joined = await t.app.request('/api/events/had-people/participation', {
@@ -437,7 +455,15 @@ describe('delete', () => {
     await t.eventAdminRepo.setStatus('had-people', 'draft')
     const notEmpty = await adminReq('/had-people', { method: 'DELETE' })
     expect(notEmpty.status).toBe(409)
-    expect(((await notEmpty.json()) as { error: string }).error).toBe(ADMIN_EVENT_ERRORS.eventNotEmpty)
+    expect(await notEmpty.json()).toEqual({
+      error: ADMIN_EVENT_ERRORS.eventNotEmpty,
+      teams: 0,
+      participants: 1,
+    })
+    // Nothing was deleted and nothing was audited as deleted.
+    expect((await adminReq(`/${SLUG}`)).status).toBe(200)
+    expect((await adminReq('/had-people')).status).toBe(200)
+    expect(auditActions()).not.toContain('admin_event_delete')
   })
 })
 
