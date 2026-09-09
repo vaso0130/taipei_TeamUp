@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
-import { RouterLink, RouterView } from 'vue-router'
+import { RouterLink, RouterView, useRoute } from 'vue-router'
 import RealDarkMode from './components/RealDarkMode.vue'
 import {
   applyThemeClass,
@@ -13,6 +13,7 @@ import { useEventStore } from './stores/event.js'
 
 const eventStore = useEventStore()
 const auth = useAuthStore()
+const route = useRoute()
 
 // ---- dark mode toggle（第一次按是陷阱） ----
 const realDark = ref(false) // the flashlight prank overlay
@@ -261,7 +262,8 @@ const navItems = [
       </div>
     </header>
 
-    <main class="mx-auto w-full max-w-5xl flex-1 px-4 py-8">
+    <!-- Editor-style pages (route meta `wide`) get a three-column-friendly width. -->
+    <main class="mx-auto w-full flex-1 px-4 py-8" :class="route.meta.wide ? 'max-w-7xl' : 'max-w-5xl'">
       <div
         v-if="auth.sessionExpired"
         class="card mb-6 flex flex-wrap items-center justify-between gap-3 bg-warn-mist px-5 py-4 text-sm"

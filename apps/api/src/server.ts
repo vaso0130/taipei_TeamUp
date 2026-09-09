@@ -13,7 +13,10 @@ import { FieldCipher } from './crypto/envelope.js'
 import { buildKekFromEnv, googleTokenProvider, requireEnv } from './crypto/kek-from-env.js'
 import { RecaptchaEnterpriseVerifier, type CaptchaVerifier } from './security/captcha.js'
 import { createDb, DEFAULT_POOL_MAX, type Db } from './db/client.js'
+import { DbEventAdminRepository } from './events/admin-db-repository.js'
+import { EventAdminService } from './events/admin-service.js'
 import { DbEventRepository } from './events/db-repository.js'
+import { loadEventSeedFiles } from './events/seed-loader.js'
 import { SeedEventRepository } from './events/seed-repository.js'
 import { DbMessageRepository, DbThreadRepository } from './messaging/db-repository.js'
 import { MessagingService } from './messaging/service.js'
@@ -325,6 +328,14 @@ function buildDeps(): { appDeps: AppDeps; db?: Db } {
     },
     { requeueAfterMinutes: intEnv('MODERATION_REQUEUE_AFTER_MINUTES', 15) },
   )
+  // Repo seed files double as editor templates (ADR-035).
+  const eventAdmin = new EventAdminService({
+    events: new DbEventAdminRepository(db),
+    teams: teamRepo,
+    participants: participantRepo,
+    audit,
+    loadTemplates: () => loadEventSeedFiles(),
+  })
 
   const appDeps: AppDeps = {
     events,
@@ -340,6 +351,7 @@ function buildDeps(): { appDeps: AppDeps; db?: Db } {
       admin,
       privacy,
       cleanup,
+      eventAdmin,
     },
     adminEmails,
     rateLimits: rateLimitsFromEnv(),

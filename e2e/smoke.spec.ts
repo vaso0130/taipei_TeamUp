@@ -52,6 +52,13 @@ test('signed-out "create" CTA leads to login with an explanation', async ({ page
   await expect(page.getByText(/登入後即可建立/)).toBeVisible()
 })
 
+test('signed-out visit to /admin/events shows the sign-in prompt', async ({ page }) => {
+  await page.goto('/admin/events')
+  await expect(page.getByRole('heading', { level: 1 })).toContainText('活動管理')
+  await expect(page.getByText('僅限管理員使用，請先登入')).toBeVisible()
+  await expect(page.getByRole('link', { name: '前往登入' })).toBeVisible()
+})
+
 test.describe('mobile header (375px)', () => {
   test.use({ viewport: { width: 375, height: 812 }, hasTouch: true, isMobile: true })
 

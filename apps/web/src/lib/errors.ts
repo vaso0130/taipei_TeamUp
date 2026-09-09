@@ -53,6 +53,29 @@ export function describeApiError(
       return '登入已過期，請重新登入'
     case 'forbidden':
       return '你沒有權限執行這個操作'
+    // 活動管理（docs/design/admin-events.md §5）
+    case 'slug_taken':
+      return '這個代號已被使用'
+    case 'slug_immutable':
+      return '網址代號建立後不可更改'
+    case 'max_members_below_existing':
+      return `已有${ctx.termTeam}的人數超過這個上限`
+    case 'min_members_above_existing':
+      return `已有${ctx.termTeam}的人數低於這個下限`
+    case 'dictionary_key_in_use':
+      return '已有人選用這個選項，只能停用不能刪除'
+    case 'cannot_open_incomplete':
+      return '活動設定還不完整，無法開放'
+    case 'invalid_status_transition':
+      return '目前狀態不能直接變成這個狀態'
+    case 'event_not_empty':
+      return `已有參加者或${ctx.termTeam}，無法刪除`
+    case 'event_not_found':
+      return '找不到這場活動'
+    case 'read_only_mode':
+      return '目前為唯讀模式（未連接資料庫），無法修改活動設定'
+    case 'unavailable':
+      return '服務暫時無法使用，請稍後再試'
     default:
       break
   }
@@ -60,6 +83,11 @@ export function describeApiError(
   if (err.status === 429) return '操作太頻繁，請稍後再試'
   if (err.status === 503) return '服務暫時無法使用，請稍後再試'
   return fallback
+}
+
+/** Seed read-only mode (no database): admin writes are refused with 503. */
+export function isReadOnlyMode(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 503
 }
 
 /** Classify a read failure for list/detail pages. */

@@ -5,11 +5,16 @@ import { createMiddleware } from 'hono/factory'
 import { requestId } from 'hono/request-id'
 import { z, type ZodType } from 'zod'
 import {
+  ADMIN_EVENT_ERRORS,
   AdminDecideSchema,
+  AdminEventStatusInputSchema,
   AdminReportsQuerySchema,
   ApplySchema,
   ContactsSchema,
+  CreateEventInputSchema,
   CreateTeamSchema,
+  DuplicateEventInputSchema,
+  EVENT_SLUG_PATTERN,
   InviteSchema,
   ModerationTaskSchema,
   ParticipationInputSchema,
@@ -18,8 +23,10 @@ import {
   SendMessageSchema,
   StartThreadSchema,
   TEAM_STATUSES,
+  UpdateEventInputSchema,
   UpdateMeSchema,
   UpdateTeamSchema,
+  type AdminEventErrorCode,
   type TeamStatus,
 } from '@teamup/shared'
 import { secureHeaders } from 'hono/secure-headers'
@@ -27,6 +34,7 @@ import { AdminError, AdminService } from './admin/service.js'
 import { ApplicationError, type ApplicationService } from './applications/service.js'
 import { AuthError, type AuthIdentity, type TokenVerifier } from './auth/verifier.js'
 import { normalizeEmail, secretEquals } from './crypto/email.js'
+import { EventAdminError, type EventAdminService } from './events/admin-service.js'
 import type { EventRepository } from './events/repository.js'
 import { SlidingWindowLimiter } from './http/rate-limit.js'
 import { MessagingError, type MessagingService } from './messaging/service.js'
@@ -51,6 +59,8 @@ export interface AuthedDeps {
   admin: AdminService
   privacy: PrivacyService
   cleanup: CleanupService
+  /** Admin event management (ADR-035); absent → those routes return 503 `unavailable`. */
+  eventAdmin?: EventAdminService
 }
 
 /**
@@ -164,6 +174,18 @@ const TEAM_ERROR_STATUS: Record<string, 404 | 400 | 403 | 409> = {
   contacts_not_allowed_yet: 409,
   /** The caller must join the event (and answer its adult check) first. */
   participation_required: 409,
+}
+
+const EVENT_ADMIN_ERROR_STATUS: Record<AdminEventErrorCode, 404 | 409> = {
+  [ADMIN_EVENT_ERRORS.eventNotFound]: 404,
+  [ADMIN_EVENT_ERRORS.slugTaken]: 409,
+  [ADMIN_EVENT_ERRORS.slugImmutable]: 409,
+  [ADMIN_EVENT_ERRORS.maxMembersBelowExisting]: 409,
+  [ADMIN_EVENT_ERRORS.minMembersAboveExisting]: 409,
+  [ADMIN_EVENT_ERRORS.dictionaryKeyInUse]: 409,
+  [ADMIN_EVENT_ERRORS.invalidStatusTransition]: 409,
+  [ADMIN_EVENT_ERRORS.cannotOpenIncomplete]: 409,
+  [ADMIN_EVENT_ERRORS.eventNotEmpty]: 409,
 }
 
 const HOUR_MS = 60 * 60 * 1000
@@ -845,6 +867,123 @@ export function createApp(deps: AppDeps) {
     if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
     await authed!.moderation.decide(body.data.target, body.data.action, c.get('user').id)
     return c.json({ decided: true })
+  })
+
+  // ---- admin event management (ADR-035, docs/design/admin-events.md §8) ----
+
+  /** Wired only with a database; the seed-file mode has nothing to write to. */
+  const requireEventAdmin = createMiddleware<AppEnv>(async (c, next) => {
+    if (!authed?.eventAdmin) {
+      return c.json({ error: 'unavailable', message: '此環境未連接資料庫，無法管理活動' }, 503)
+    }
+    await next()
+  })
+  const eventAdmin = () => authed!.eventAdmin!
+
+  /** A malformed slug is simply "no such event", never a query. */
+  const eventSlugParam = createMiddleware<AppEnv>(async (c, next) => {
+    if (!EVENT_SLUG_PATTERN.test(c.req.param('slug') ?? '')) {
+      return c.json({ error: ADMIN_EVENT_ERRORS.eventNotFound }, 404)
+    }
+    await next()
+  })
+
+  /** `{ error, ...extra }` — extra carries `current` / `key,count` / `from,to` / `details`. */
+  const eventAdminError = (c: Context<AppEnv>, err: unknown) => {
+    if (err instanceof EventAdminError) {
+      return c.json({ error: err.code, ...err.extra }, EVENT_ADMIN_ERROR_STATUS[err.code])
+    }
+    throw err
+  }
+
+  app.use('/api/admin/events', requireEventAdmin)
+  app.use('/api/admin/events/*', requireEventAdmin)
+
+  app.get('/api/admin/events', async (c) => {
+    return c.json({ items: await eventAdmin().list() })
+  })
+
+  // Registered before `:slug` so the literal path wins.
+  app.get('/api/admin/events/templates', (c) => {
+    return c.json({ templates: eventAdmin().templates() })
+  })
+
+  app.post('/api/admin/events', async (c) => {
+    const body = await parseBody(c, CreateEventInputSchema)
+    if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
+    try {
+      return c.json({ seed: await eventAdmin().create(body.data, c.get('user').id) }, 201)
+    } catch (err) {
+      return eventAdminError(c, err)
+    }
+  })
+
+  app.get('/api/admin/events/:slug', eventSlugParam, async (c) => {
+    try {
+      return c.json(await eventAdmin().get(c.req.param('slug')))
+    } catch (err) {
+      return eventAdminError(c, err)
+    }
+  })
+
+  app.put('/api/admin/events/:slug', eventSlugParam, async (c) => {
+    const body = await parseBody(c, UpdateEventInputSchema)
+    if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
+    try {
+      return c.json(await eventAdmin().update(c.req.param('slug'), body.data, c.get('user').id))
+    } catch (err) {
+      return eventAdminError(c, err)
+    }
+  })
+
+  app.post('/api/admin/events/:slug/status', eventSlugParam, async (c) => {
+    const body = await parseBody(c, AdminEventStatusInputSchema)
+    if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
+    try {
+      return c.json({
+        seed: await eventAdmin().setStatus(
+          c.req.param('slug'),
+          body.data.status,
+          c.get('user').id,
+        ),
+      })
+    } catch (err) {
+      return eventAdminError(c, err)
+    }
+  })
+
+  app.post('/api/admin/events/:slug/duplicate', eventSlugParam, async (c) => {
+    const body = await parseBody(c, DuplicateEventInputSchema)
+    if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
+    try {
+      return c.json(
+        { seed: await eventAdmin().duplicate(c.req.param('slug'), body.data, c.get('user').id) },
+        201,
+      )
+    } catch (err) {
+      return eventAdminError(c, err)
+    }
+  })
+
+  /** Seed-file-compatible JSON download (`pnpm seed` accepts it as-is). */
+  app.get('/api/admin/events/:slug/export', eventSlugParam, async (c) => {
+    const slug = c.req.param('slug')
+    try {
+      const seed = await eventAdmin().exportSeed(slug)
+      c.header('content-disposition', `attachment; filename="${slug}.json"`)
+      return c.json(seed)
+    } catch (err) {
+      return eventAdminError(c, err)
+    }
+  })
+
+  app.delete('/api/admin/events/:slug', eventSlugParam, async (c) => {
+    try {
+      await eventAdmin().delete(c.req.param('slug'), c.get('user').id)
+      return c.body(null, 204)
+    } catch (err) {
+      return eventAdminError(c, err)
+    }
   })
 
   // ---- internal callbacks (Cloud Tasks worker, Cloud Scheduler cleanup) ----

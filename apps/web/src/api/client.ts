@@ -23,6 +23,13 @@ import type {
   TeamSummary,
   ThreadView,
   UpdateTeamInput,
+  AdminEventDetail,
+  AdminEventSummary,
+  AdminEventUpdateResult,
+  DuplicateEventInput,
+  EventSeed,
+  EventStatus,
+  EventTemplate,
 } from '@teamup/shared'
 
 const base = import.meta.env.VITE_API_BASE_URL ?? ''
@@ -31,6 +38,11 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     public readonly code: string,
+    /**
+     * Remaining fields of the error body (`issues`, `details`, `current`,
+     * …) so callers can map a code onto a specific form field.
+     */
+    public readonly body: Record<string, unknown> = {},
   ) {
     super(`API ${status}: ${code}`)
     this.name = 'ApiError'
@@ -77,20 +89,49 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const init: RequestInit = { method: opts.method ?? 'GET', headers }
   if (opts.body !== undefined) init.body = JSON.stringify(opts.body)
   const res = await fetch(`${base}${path}`, init)
-  if (!res.ok) {
-    let code = 'unknown_error'
-    try {
-      code = ((await res.json()) as { error?: string }).error ?? code
-    } catch {
-      // non-JSON error body — keep the generic code
-    }
-    if (res.status === 401 && opts.token) unauthorizedHandler?.()
-    throw new ApiError(res.status, code)
-  }
+  if (!res.ok) throw await toApiError(res, Boolean(opts.token))
+  // 204 No Content (e.g. DELETE) has no body to parse.
+  if (res.status === 204) return undefined as T
   return (await res.json()) as T
 }
 
+async function toApiError(res: Response, authenticated: boolean): Promise<ApiError> {
+  let code = 'unknown_error'
+  let body: Record<string, unknown> = {}
+  try {
+    const parsed = (await res.json()) as Record<string, unknown>
+    if (parsed && typeof parsed === 'object') {
+      const { error, ...rest } = parsed
+      if (typeof error === 'string') code = error
+      body = rest
+    }
+  } catch {
+    // non-JSON error body — keep the generic code
+  }
+  if (res.status === 401 && authenticated) unauthorizedHandler?.()
+  return new ApiError(res.status, code, body)
+}
+
+/**
+ * Authenticated download: returns the raw body plus the server-suggested
+ * filename (Content-Disposition), for the caller to hand to the browser.
+ */
+async function requestBlob(
+  path: string,
+  token: TokenSource,
+): Promise<{ blob: Blob; filename: string | null }> {
+  const headers: Record<string, string> = {}
+  const bearer = await resolveToken(token)
+  if (bearer) headers.authorization = `Bearer ${bearer}`
+  const res = await fetch(`${base}${path}`, { headers })
+  if (!res.ok) throw await toApiError(res, true)
+  const disposition = res.headers.get('content-disposition') ?? ''
+  const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition)
+  return { blob: await res.blob(), filename: match?.[1] ? decodeURIComponent(match[1]) : null }
+}
+
 const slugPath = (slug: string) => `/api/events/${encodeURIComponent(slug)}`
+const adminEventPath = (slug: string) => `/api/admin/events/${encodeURIComponent(slug)}`
 
 export const api = {
   listEvents: () => request<{ events: EventSummary[] }>('/api/events'),
@@ -238,6 +279,34 @@ export const api = {
       method: 'DELETE',
       token,
     }),
+
+  // ---- 活動管理 (docs/design/admin-events.md §8) ----
+  adminListEvents: (token: TokenSource) =>
+    request<{ items: AdminEventSummary[] }>('/api/admin/events', { token }),
+  adminListEventTemplates: (token: TokenSource) =>
+    request<{ templates: EventTemplate[] }>('/api/admin/events/templates', { token }),
+  adminGetEvent: (token: TokenSource, slug: string) =>
+    request<AdminEventDetail>(adminEventPath(slug), { token }),
+  adminCreateEvent: (token: TokenSource, seed: EventSeed) =>
+    request<{ seed: EventSeed }>('/api/admin/events', { method: 'POST', token, body: seed }),
+  adminUpdateEvent: (token: TokenSource, slug: string, seed: EventSeed) =>
+    request<AdminEventUpdateResult>(adminEventPath(slug), { method: 'PUT', token, body: seed }),
+  adminSetEventStatus: (token: TokenSource, slug: string, status: EventStatus) =>
+    request<{ seed: EventSeed }>(`${adminEventPath(slug)}/status`, {
+      method: 'POST',
+      token,
+      body: { status },
+    }),
+  adminDuplicateEvent: (token: TokenSource, slug: string, input: DuplicateEventInput) =>
+    request<{ seed: EventSeed }>(`${adminEventPath(slug)}/duplicate`, {
+      method: 'POST',
+      token,
+      body: input,
+    }),
+  adminExportEvent: (token: TokenSource, slug: string) =>
+    requestBlob(`${adminEventPath(slug)}/export`, token),
+  adminDeleteEvent: (token: TokenSource, slug: string) =>
+    request<void>(adminEventPath(slug), { method: 'DELETE', token }),
 
   listThreads: (token: TokenSource, slug: string) =>
     request<{ threads: ThreadView[] }>(`${slugPath(slug)}/threads`, { token }),

@@ -9,6 +9,9 @@ import { DevTokenVerifier } from '../src/auth/verifier.js'
 import { emailLookupHmac, normalizeEmail } from '../src/crypto/email.js'
 import { FieldCipher } from '../src/crypto/envelope.js'
 import { LocalKek } from '../src/crypto/kek.js'
+import { MemoryEventAdminRepository } from '../src/events/admin-repository.js'
+import { EventAdminService } from '../src/events/admin-service.js'
+import { loadEventSeedFiles } from '../src/events/seed-loader.js'
 import { SeedEventRepository } from '../src/events/seed-repository.js'
 import {
   MemoryMessageRepository,
@@ -58,9 +61,14 @@ export function buildTestApp(
     cleanup?: CleanupOptions
     /** Second UserService pepper (pepper rotation tests). */
     previousPepper?: string
+    /** Fixed clock for the event admin service (open checklist, warnings). */
+    now?: () => Date
+    /** Leave the event admin service unwired (503 `unavailable` tests). */
+    withoutEventAdmin?: boolean
   } = {},
 ) {
   const eventsRepo = new SeedEventRepository(seeds)
+  const eventAdminRepo = new MemoryEventAdminRepository(eventsRepo)
   const userRepo = new MemoryUserRepository()
   const teamRepo = new MemoryTeamRepository()
   const applicationRepo = new MemoryApplicationRepository(teamRepo)
@@ -204,6 +212,18 @@ export function buildTestApp(
         },
         opts.cleanup ?? {},
       ),
+      ...(opts.withoutEventAdmin
+        ? {}
+        : {
+            eventAdmin: new EventAdminService({
+              events: eventAdminRepo,
+              teams: teamRepo,
+              participants: participantRepo,
+              audit,
+              loadTemplates: () => loadEventSeedFiles(),
+              ...(opts.now ? { now: opts.now } : {}),
+            }),
+          }),
     },
     rateLimits,
     ...(opts.adminEmails
@@ -215,6 +235,7 @@ export function buildTestApp(
   return {
     app,
     eventsRepo,
+    eventAdminRepo,
     userRepo,
     teamRepo,
     applicationRepo,

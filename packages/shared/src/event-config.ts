@@ -10,6 +10,12 @@ export const EVENT_STATUSES = ['draft', 'open', 'closed', 'archived'] as const
 export type EventStatus = (typeof EVENT_STATUSES)[number]
 
 /**
+ * Statuses the public event list shows. Drafts are invisible everywhere;
+ * archived events vanish from lists but stay readable by direct link.
+ */
+export const LISTED_EVENT_STATUSES = ['open', 'closed'] as const satisfies readonly EventStatus[]
+
+/**
  * Schema ceilings shared by event config and request schemas. These are
  * NOT event rules — they are the largest values the wire format can
  * express. Every per-event value (requiredContacts, maxCustomTags, …)
@@ -28,14 +34,20 @@ export const SCHEMA_LIMITS = {
 } as const
 
 /** Machine keys: lowercase snake_case, e.g. `frontend`, `civic_knowledge`. */
-const optionKey = z
+export const OPTION_KEY_PATTERN = /^[a-z][a-z0-9_]*$/
+export const OptionKeySchema = z
   .string()
-  .regex(/^[a-z][a-z0-9_]*$/, 'key must be lowercase snake_case')
+  .max(50)
+  .regex(OPTION_KEY_PATTERN, 'key must be lowercase snake_case')
+const optionKey = OptionKeySchema
 
 /** URL slugs: lowercase kebab-case, e.g. `codefest-2026-fall`. */
-const eventSlug = z
+export const EVENT_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*$/
+export const EventSlugSchema = z
   .string()
-  .regex(/^[a-z0-9][a-z0-9-]*$/, 'slug must be lowercase kebab-case')
+  .max(100)
+  .regex(EVENT_SLUG_PATTERN, 'slug must be lowercase kebab-case')
+const eventSlug = EventSlugSchema
 
 /** A dictionary entry for roles or skills, scoped to one event. */
 export const DictionaryOptionSchema = z.object({

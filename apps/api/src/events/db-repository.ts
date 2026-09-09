@@ -1,5 +1,11 @@
-import { and, asc, eq, ne } from 'drizzle-orm'
-import type { DictionaryOption, EventConfig, EventDetail, EventSummary } from '@teamup/shared'
+import { and, asc, eq, inArray, ne } from 'drizzle-orm'
+import {
+  LISTED_EVENT_STATUSES,
+  type DictionaryOption,
+  type EventConfig,
+  type EventDetail,
+  type EventSummary,
+} from '@teamup/shared'
 import type { Db } from '../db/client.js'
 import { eventRoleOptions, eventSkillOptions, events } from '../db/schema.js'
 import type { EventRepository } from './repository.js'
@@ -7,7 +13,7 @@ import type { EventRepository } from './repository.js'
 type EventRow = typeof events.$inferSelect
 type OptionRow = typeof eventRoleOptions.$inferSelect
 
-const toConfig = (row: EventRow): EventConfig => ({
+export const toConfig = (row: EventRow): EventConfig => ({
   slug: row.slug,
   name: row.name,
   description: row.description,
@@ -27,7 +33,7 @@ const toConfig = (row: EventRow): EventConfig => ({
   customTagMaxLength: row.customTagMaxLength,
 })
 
-const toOption = (row: OptionRow): DictionaryOption => ({
+export const toOption = (row: OptionRow): DictionaryOption => ({
   key: row.key,
   label: row.label,
   ...(row.category === null ? {} : { category: row.category }),
@@ -42,7 +48,7 @@ export class DbEventRepository implements EventRepository {
     const rows = await this.db
       .select()
       .from(events)
-      .where(ne(events.status, 'draft'))
+      .where(inArray(events.status, [...LISTED_EVENT_STATUSES]))
       .orderBy(asc(events.startsAt))
     return rows.map((row) => {
       const c = toConfig(row)
@@ -58,6 +64,7 @@ export class DbEventRepository implements EventRepository {
   }
 
   async getEventBySlug(slug: string): Promise<EventDetail | null> {
+    // Drafts do not exist publicly; archived events stay readable by link.
     const rows = await this.db
       .select()
       .from(events)

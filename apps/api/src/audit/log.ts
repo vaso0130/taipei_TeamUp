@@ -13,6 +13,11 @@ export type AuditAction =
   | 'admin_reactivate'
   | 'admin_suspend'
   | 'admin_team_delete'
+  | 'admin_event_create'
+  | 'admin_event_update'
+  | 'admin_event_status'
+  | 'admin_event_duplicate'
+  | 'admin_event_delete'
 
 export interface AuditEntry {
   id: string

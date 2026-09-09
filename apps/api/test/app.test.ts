@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { EventDetail, EventSummary } from '@teamup/shared'
+import { LISTED_EVENT_STATUSES, type EventDetail, type EventSummary } from '@teamup/shared'
 import { createApp } from '../src/app.js'
 import { loadEventSeeds } from '../src/events/seed-loader.js'
 import { SeedEventRepository } from '../src/events/seed-repository.js'
@@ -19,15 +19,28 @@ describe('GET /healthz', () => {
 })
 
 describe('GET /api/events', () => {
-  it('lists every non-draft seeded event', async () => {
+  it('lists every open/closed seeded event', async () => {
     const res = await app.request('/api/events')
     expect(res.status).toBe(200)
     const body = (await res.json()) as { events: EventSummary[] }
     const expected = seeds
-      .filter((s) => s.event.status !== 'draft')
+      .filter((s) => (LISTED_EVENT_STATUSES as readonly string[]).includes(s.event.status))
       .map((s) => s.event.slug)
       .sort()
     expect(body.events.map((e) => e.slug).sort()).toEqual(expected)
+  })
+
+  it('hides archived events from the list but keeps them readable by slug', async () => {
+    const first = seeds[0]
+    if (!first) throw new Error('no seeds loaded')
+    const archived = { ...first, event: { ...first.event, status: 'archived' as const } }
+    const archivedApp = createApp({ events: new SeedEventRepository([archived]) })
+
+    const list = await archivedApp.request('/api/events')
+    expect(((await list.json()) as { events: EventSummary[] }).events).toEqual([])
+
+    const detail = await archivedApp.request(`/api/events/${archived.event.slug}`)
+    expect(detail.status).toBe(200)
   })
 })
 

@@ -8,12 +8,19 @@ export function resolveSeedDir(seedDir?: string): string {
   return path.resolve(process.cwd(), seedDir ?? process.env.EVENT_SEED_DIR ?? DEFAULT_SEED_DIR)
 }
 
+export interface EventSeedFile {
+  /** File name without the `.json` extension (template key). */
+  key: string
+  seed: EventSeed
+}
+
 /**
- * Load and validate every event seed file in a directory.
- * Throws with the file name and zod issues when a seed is invalid —
- * a broken seed must fail loudly, never half-load.
+ * Load and validate every event seed file in a directory, keeping the
+ * file name (the admin template key). Throws with the file name and zod
+ * issues when a seed is invalid — a broken seed must fail loudly, never
+ * half-load.
  */
-export function loadEventSeeds(seedDir?: string): EventSeed[] {
+export function loadEventSeedFiles(seedDir?: string): EventSeedFile[] {
   const dir = resolveSeedDir(seedDir)
   const files = readdirSync(dir)
     .filter((f) => f.endsWith('.json'))
@@ -22,7 +29,7 @@ export function loadEventSeeds(seedDir?: string): EventSeed[] {
     throw new Error(`no event seed files found in ${dir}`)
   }
 
-  const seeds: EventSeed[] = []
+  const seeds: EventSeedFile[] = []
   const slugs = new Set<string>()
   for (const file of files) {
     const raw = JSON.parse(readFileSync(path.join(dir, file), 'utf8'))
@@ -35,7 +42,12 @@ export function loadEventSeeds(seedDir?: string): EventSeed[] {
       throw new Error(`duplicate event slug "${slug}" (${file})`)
     }
     slugs.add(slug)
-    seeds.push(result.data)
+    seeds.push({ key: file.slice(0, -'.json'.length), seed: result.data })
   }
   return seeds
+}
+
+/** Load and validate every event seed file in a directory. */
+export function loadEventSeeds(seedDir?: string): EventSeed[] {
+  return loadEventSeedFiles(seedDir).map((f) => f.seed)
 }

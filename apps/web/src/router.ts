@@ -19,6 +19,24 @@ export const router = createRouter({
     },
     { path: '/profile', name: 'profile', component: () => import('./pages/ProfilePage.vue') },
     { path: '/admin', name: 'admin', component: () => import('./pages/AdminPage.vue') },
+    {
+      path: '/admin/events',
+      name: 'admin-events',
+      component: () => import('./pages/AdminEventsPage.vue'),
+    },
+    {
+      path: '/admin/events/new',
+      name: 'admin-event-new',
+      component: () => import('./pages/AdminEventNewPage.vue'),
+      meta: { wide: true },
+    },
+    {
+      path: '/admin/events/:slug',
+      name: 'admin-event-edit',
+      component: () => import('./pages/AdminEventEditorPage.vue'),
+      props: { mode: 'edit' },
+      meta: { wide: true },
+    },
     { path: '/privacy', name: 'privacy', component: () => import('./pages/PrivacyPage.vue') },
     { path: '/terms', name: 'terms', component: () => import('./pages/TermsPage.vue') },
     {

@@ -302,6 +302,11 @@ async function disbandTeam(team: AdminTeamItem) {
         <button class="btn btn-quiet text-sm" :disabled="loading" @click="load">
           重新整理
         </button>
+        <!-- Event management is its own page (deep links, leave guard) — styled like a tab. -->
+        <RouterLink :to="{ name: 'admin-events' }" class="btn btn-quiet text-sm">
+          活動管理
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6" /></svg>
+        </RouterLink>
       </div>
 
       <p v-if="feedback" class="mt-4 text-sm text-danger" role="alert">{{ feedback }}</p>
