@@ -16,23 +16,50 @@
  *   pnpm --filter @teamup/api rehash:email-lookups            # apply
  *   pnpm --filter @teamup/api rehash:email-lookups -- --dry   # report only
  *
+ * `--absorb-empty-duplicates`: when the canonical lookup is already held
+ * by another row that is EMPTY (no participation, no team membership,
+ * no applications, no messages; not suspended) — typically an account
+ * minted by logging in between deploy and re-hash — that empty row is
+ * hard-deleted and the real row takes the lookup. Non-empty occupants
+ * are still reported as conflicts.
+ *
  * Requires DATABASE_URL, EMAIL_HMAC_PEPPER and the KEK settings
  * (KEK_PROVIDER + LOCAL_KEK_BASE64 | KMS_KEY_NAME) of the environment
  * whose rows are being re-hashed.
  */
-import { eq } from 'drizzle-orm'
+import { and, count, eq, isNull } from 'drizzle-orm'
 import { emailLookupHmac, lookupEquals } from '../src/crypto/email.js'
 import { FieldCipher } from '../src/crypto/envelope.js'
 import { buildKekFromEnv, requireEnv } from '../src/crypto/kek-from-env.js'
-import { createDb } from '../src/db/client.js'
+import { createDb, type Db } from '../src/db/client.js'
 import { isUniqueViolation } from '../src/db/pg-errors.js'
-import { users } from '../src/db/schema.js'
+import {
+  applications,
+  eventParticipants as participants,
+  messages,
+  teamMembers,
+  users,
+} from '../src/db/schema.js'
 import { loadLocalEnv } from '../src/env.js'
 
 loadLocalEnv()
 
+/** True when nothing but the user row itself exists for this account. */
+async function isEmptyAccount(db: Db, userId: string, status: string): Promise<boolean> {
+  if (status === 'suspended') return false
+  const [p] = await db.select({ n: count() }).from(participants).where(eq(participants.userId, userId))
+  const [m] = await db
+    .select({ n: count() })
+    .from(teamMembers)
+    .where(and(eq(teamMembers.userId, userId), isNull(teamMembers.leftAt)))
+  const [a] = await db.select({ n: count() }).from(applications).where(eq(applications.applicantId, userId))
+  const [s] = await db.select({ n: count() }).from(messages).where(eq(messages.senderId, userId))
+  return (p?.n ?? 0) === 0 && (m?.n ?? 0) === 0 && (a?.n ?? 0) === 0 && (s?.n ?? 0) === 0
+}
+
 async function main() {
   const dryRun = process.argv.includes('--dry')
+  const absorb = process.argv.includes('--absorb-empty-duplicates')
   const databaseUrl = requireEnv('DATABASE_URL')
   const pepper = requireEnv('EMAIL_HMAC_PEPPER')
   const cipher = new FieldCipher(buildKekFromEnv())
@@ -42,6 +69,7 @@ async function main() {
   let updated = 0
   let unchanged = 0
   let conflicts = 0
+  let absorbed = 0
   let failures = 0
   try {
     const rows = await db
@@ -62,6 +90,31 @@ async function main() {
         unchanged++
         continue
       }
+      const [occupant] = await db
+        .select({ id: users.id, status: users.status })
+        .from(users)
+        .where(eq(users.emailLookup, wanted))
+      if (occupant) {
+        const empty = absorb && (await isEmptyAccount(db, occupant.id, occupant.status))
+        if (!empty) {
+          conflicts++
+          // Only ids are printed — never the address itself.
+          console.error(
+            `user ${row.id}: row ${occupant.id} already owns the canonical lookup — left unchanged, resolve manually` +
+              (absorb ? ' (occupant is not empty)' : ' (re-run with --absorb-empty-duplicates if it is an empty duplicate)'),
+          )
+          continue
+        }
+        if (dryRun) {
+          absorbed++
+          updated++
+          console.log(`user ${row.id}: lookup would change; empty duplicate ${occupant.id} would be removed`)
+          continue
+        }
+        await db.delete(users).where(eq(users.id, occupant.id))
+        absorbed++
+        console.log(`user ${row.id}: removed empty duplicate ${occupant.id}`)
+      }
       if (dryRun) {
         updated++
         console.log(`user ${row.id}: lookup would change`)
@@ -76,10 +129,7 @@ async function main() {
       } catch (err) {
         if (isUniqueViolation(err)) {
           conflicts++
-          // Only ids are printed — never the address itself.
-          console.error(
-            `user ${row.id}: another row already owns the canonical lookup — left unchanged, resolve manually`,
-          )
+          console.error(`user ${row.id}: lookup taken concurrently — left unchanged, re-run`)
           continue
         }
         throw err
@@ -89,7 +139,7 @@ async function main() {
     await db.$client.end()
   }
   console.log(
-    `${dryRun ? '[dry run] ' : ''}scanned=${scanned} updated=${updated} unchanged=${unchanged} conflicts=${conflicts} failures=${failures}`,
+    `${dryRun ? '[dry run] ' : ''}scanned=${scanned} updated=${updated} unchanged=${unchanged} absorbed=${absorbed} conflicts=${conflicts} failures=${failures}`,
   )
   if (conflicts > 0 || failures > 0) process.exitCode = 2
 }

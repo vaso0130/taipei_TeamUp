@@ -98,7 +98,7 @@
   - `MODERATION_REQUEUE_AFTER_MINUTES`（預設 15）：待審內容超過此時間仍無審核紀錄即由 cleanup 重新入列
   - `EMAIL_HMAC_PEPPER_PREVIOUS`：pepper 輪替期間的舊值（見下方「Email lookup 重算」）
 - 服務帳號最小權限：`cloudsql.client`、`cloudkms.cryptoKeyEncrypterDecrypter`、`aiplatform.user`、`cloudtasks.enqueuer`；Cloud Tasks／Scheduler 用的呼叫端服務帳號另需 `run.invoker`（若 Cloud Run 不允許未驗證呼叫）
-- **reCAPTCHA Enterprise 尚未啟用**：`RECAPTCHA_SITE_KEY`／`VITE_RECAPTCHA_SITE_KEY` 目前留空＝整個略過（ADR-014 不做半套）。開放公眾使用前應在 Console 建立 site key（score-based、網域填 Hosting 網域與 `xn--ej4a.taipei`）並同時設定前後端兩個變數；只設一邊會使開團／申請全部失敗。
+- **reCAPTCHA Enterprise**：`RECAPTCHA_SITE_KEY`（後端）與 `VITE_RECAPTCHA_SITE_KEY`（前端建置）兩者留空＝整個略過（ADR-014 不做半套）。啟用步驟：`gcloud services enable recaptchaenterprise.googleapis.com`；建 score 型網頁金鑰 `gcloud recaptcha keys create --web --integration-type=score --domains="^|^<hosting-domain>|xn--ej4a.taipei"`（Windows 的 gcloud 逗號清單要用 `^|^` 分隔符）；API 服務帳號授予 `roles/recaptchaenterprise.agent`（沒有這個角色時每次評估都會失敗，開團／申請全部 `captcha_failed`）；**先**建前端再設後端——後端未設時會忽略前端送的 token，反過來則全部失敗。
 - 優雅關機：收到 SIGTERM 停收新連線→等待進行中請求→關閉 DB pool；Cloud Run 預設 10 秒寬限期足夠。
 
 ### Cloud Tasks（審核佇列）
@@ -162,15 +162,23 @@ Email canonical 形式改變（ADR-028：去 `+tag`、Gmail 去點）或 pepper 
 步驟（建議在維護窗執行，數分鐘內完成）：
 
 1. **先部署**含新 canonical 邏輯的 API（新登入立刻用新形式；舊列由 `EMAIL_HMAC_PEPPER_PREVIOUS`／rehash 銜接）。
-2. 在能連到 Cloud SQL 的環境（Cloud Build 內網 job、或有 Auth Proxy 的機器）以**正式環境同一組** `DATABASE_URL`、`EMAIL_HMAC_PEPPER`、`KEK_PROVIDER=kms` + `KMS_KEY_NAME` 執行 dry run：
+2. 在能連到 Cloud SQL 的環境以**正式環境同一組** `DATABASE_URL`、`EMAIL_HMAC_PEPPER`、`KEK_PROVIDER=kms` + `KMS_KEY_NAME` 執行 dry run。開發機連不到 Cloud SQL 時用 `deploy/cloudbuild-rehash.yaml`：它以 **API 的服務帳號**跑在 Cloud Build 內網，掛同一個 `/cloudsql/<instance>` socket 與 Secret Manager 的 runtime 密鑰，KMS 解密權限與 Cloud Run 完全相同：
 
    ```bash
+   gcloud builds submit --config deploy/cloudbuild-rehash.yaml \
+     --substitutions=_INSTANCE=<PROJECT_ID>:asia-east1:<SQL_INSTANCE>,_DRY=--dry,_KMS_KEY_NAME=<KMS_KEY_NAME> \
+     --service-account=projects/<PROJECT_ID>/serviceAccounts/<API_SA>@<PROJECT_ID>.iam.gserviceaccount.com \
+     --project <PROJECT_ID> .
+   # 本機有 Auth Proxy 時可直接：
    pnpm --filter @teamup/api rehash:email-lookups -- --dry
    ```
 
+   （`--service-account` 需要執行者對該 SA 有 `iam.serviceAccountUser`；SA 本身需 `logging.logWriter` 與 Cloud Build 來源 bucket 的讀取權。）
+
    輸出 `scanned/updated/unchanged/conflicts/failures` 與會變動的 user id（**不印地址**）。
 3. dry run 無 `failures` 後正式執行（同指令去掉 `--dry`）。腳本冪等，可重跑。
-4. **conflict 處理**：兩列塌縮到同一 canonical（例如 `a.b@gmail.com` 與 `ab@gmail.com` 在改版前各自註冊）時腳本**不自動合併**，先到的列保留、後到的列維持舊 lookup 並印出 id，exit code 2。處理方式：由當事人登入（會落到保留的那一列）自行決定，或管理員以後台停權／當事人刪除多餘帳號後重跑。
+4. **conflict 處理**：兩列塌縮到同一 canonical（例如 `a.b@gmail.com` 與 `ab@gmail.com` 在改版前各自註冊）時腳本**不自動合併**，先到的列保留、後到的列維持舊 lookup 並印出 id，exit code 2。最常見的衝突是「部署後、rehash 前」有人登入而被誤建的**空白重複帳號**（沒有參加資料、隊伍、申請、訊息）：加 `--absorb-empty-duplicates`（Cloud Build 以 `_EXTRA=--absorb-empty-duplicates` 帶入）會把空白重複列硬刪並讓原列取得 lookup；非空白的佔位列仍回報 conflict，由當事人或管理員處理。
+   登入端同時有保險：`ensureUser` 找不到 canonical lookup 時會用舊正規化形式再找一次並就地改寫（ADR-028 lazy migration），所以部署後舊帳號正常登入不會再被誤建；只有 rehash 前已產生的重複列需要 absorb。
 5. pepper 輪替時：新舊 pepper 同時設定（`EMAIL_HMAC_PEPPER` 新、`EMAIL_HMAC_PEPPER_PREVIOUS` 舊）部署 → 跑 rehash → 確認 `unchanged == scanned` → 移除 `EMAIL_HMAC_PEPPER_PREVIOUS` 再部署一次。
 
 `failures > 0`（解密失敗）代表 KEK 設定與寫入時不同，**停止並檢查** `KMS_KEY_NAME`，不要在錯的金鑰下繼續。

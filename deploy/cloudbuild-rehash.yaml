@@ -1,0 +1,54 @@
+# One-off: re-hash users.email_lookup inside Cloud Build (GCP network),
+# using the API's own service account so KMS decryption and the runtime
+# secrets work exactly as in Cloud Run. Run after deploying an API whose
+# canonical email form changed (ADR-028) or after a pepper rotation.
+#
+#   gcloud builds submit --config deploy/cloudbuild-rehash.yaml \
+#     --substitutions=_INSTANCE=<PROJECT_ID>:<REGION>:<SQL_INSTANCE>,_DRY=--dry \
+#     --service-account=projects/<PROJECT_ID>/serviceAccounts/<API_SA>@<PROJECT_ID>.iam.gserviceaccount.com \
+#     --project <PROJECT_ID> .
+#
+# Drop `_DRY=--dry` (pass `_DRY=` ) to apply. The proxy exposes the same
+# /cloudsql/<instance> unix socket Cloud Run uses, so the runtime
+# DATABASE_URL secret works unchanged.
+substitutions:
+  _INSTANCE: PROJECT_ID:REGION:INSTANCE
+  _PROXY_VERSION: v2.15.2
+  _DRY: --dry
+  # Extra script flags, e.g. --absorb-empty-duplicates (see the script header).
+  _EXTRA: ''
+  _KMS_KEY_NAME: projects/PROJECT_ID/locations/REGION/keyRings/RING/cryptoKeys/KEY
+  _DB_URL_SECRET: teamup-database-url
+  _PEPPER_SECRET: teamup-email-pepper
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - id: rehash
+    name: node:24
+    entrypoint: bash
+    secretEnv: ['DATABASE_URL', 'EMAIL_HMAC_PEPPER']
+    env:
+      - KEK_PROVIDER=kms
+      - KMS_KEY_NAME=${_KMS_KEY_NAME}
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        curl -sSL -o /workspace/cloud-sql-proxy \
+          https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/${_PROXY_VERSION}/cloud-sql-proxy.linux.amd64
+        chmod +x /workspace/cloud-sql-proxy
+        mkdir -p /cloudsql
+        /workspace/cloud-sql-proxy --unix-socket /cloudsql ${_INSTANCE} &
+        sleep 5
+        corepack enable pnpm
+        pnpm install --frozen-lockfile --filter @teamup/api...
+        pnpm --filter @teamup/api rehash:email-lookups -- ${_DRY} ${_EXTRA}
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/${PROJECT_ID}/secrets/${_DB_URL_SECRET}/versions/latest
+      env: DATABASE_URL
+    - versionName: projects/${PROJECT_ID}/secrets/${_PEPPER_SECRET}/versions/latest
+      env: EMAIL_HMAC_PEPPER

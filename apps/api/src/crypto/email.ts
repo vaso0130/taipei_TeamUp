@@ -40,11 +40,29 @@ export function normalizeEmail(email: string): string {
   return `${local}@${domain}`
 }
 
-export function emailLookupHmac(email: string, pepper: string): Buffer {
+/**
+ * The canonical form used before alias collapsing (ADR-028): case,
+ * surrounding whitespace and NFC only. Rows hashed under it are still
+ * found on login and re-hashed on the spot (see UserService).
+ */
+export function legacyNormalizeEmail(email: string): string {
+  return email.trim().toLowerCase().normalize('NFC')
+}
+
+function hmacOf(normalizedEmail: string, pepper: string): Buffer {
   if (pepper.length < 32) {
     throw new Error('EMAIL_HMAC_PEPPER must be at least 32 characters')
   }
-  return createHmac('sha256', pepper).update(normalizeEmail(email), 'utf8').digest()
+  return createHmac('sha256', pepper).update(normalizedEmail, 'utf8').digest()
+}
+
+export function emailLookupHmac(email: string, pepper: string): Buffer {
+  return hmacOf(normalizeEmail(email), pepper)
+}
+
+/** Lookup value a row received before alias collapsing — migration fallback only. */
+export function legacyEmailLookupHmac(email: string, pepper: string): Buffer {
+  return hmacOf(legacyNormalizeEmail(email), pepper)
 }
 
 export function lookupEquals(a: Buffer, b: Buffer): boolean {

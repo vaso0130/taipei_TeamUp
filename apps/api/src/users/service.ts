@@ -1,7 +1,13 @@
 import { randomBytes, randomInt } from 'node:crypto'
 import { uuidv7 } from 'uuidv7'
 import type { MeView } from '@teamup/shared'
-import { emailHint, emailLookupHmac, normalizeEmail } from '../crypto/email.js'
+import {
+  emailHint,
+  emailLookupHmac,
+  legacyEmailLookupHmac,
+  lookupEquals,
+  normalizeEmail,
+} from '../crypto/email.js'
 import type { FieldCipher } from '../crypto/envelope.js'
 import { UniqueViolationError, type UserRecord, type UserRepository } from './repository.js'
 
@@ -36,7 +42,7 @@ export class UserService {
    */
   async ensureUser(email: string): Promise<UserRecord> {
     const lookup = emailLookupHmac(email, this.pepper)
-    const existing = (await this.repo.findByLookup(lookup)) ?? (await this.findByPreviousPepper(email, lookup))
+    const existing = (await this.repo.findByLookup(lookup)) ?? (await this.findByLegacyLookup(email, lookup))
     if (existing && existing.status !== 'deleted') return existing
     if (existing) {
       await this.repo.updateEmailLookup(existing.id, randomBytes(lookup.length))
@@ -61,24 +67,47 @@ export class UserService {
     }
   }
 
-  /** Pepper rotation: find under the previous pepper and re-hash to the current one. */
-  private async findByPreviousPepper(
+  /**
+   * Lookup values a row for this address may still carry from before a
+   * migration: the pre-alias-collapsing form (ADR-028) and, during a
+   * pepper rotation, both forms under the previous pepper.
+   */
+  private legacyLookups(email: string, currentLookup: Buffer): Buffer[] {
+    const candidates: Buffer[] = []
+    const push = (b: Buffer) => {
+      if (!lookupEquals(b, currentLookup) && !candidates.some((c) => lookupEquals(c, b))) {
+        candidates.push(b)
+      }
+    }
+    push(legacyEmailLookupHmac(email, this.pepper))
+    if (this.options.previousPepper) {
+      push(emailLookupHmac(email, this.options.previousPepper))
+      push(legacyEmailLookupHmac(email, this.options.previousPepper))
+    }
+    return candidates
+  }
+
+  /** Lazy migration on login: find under a legacy lookup and re-hash to the current one. */
+  private async findByLegacyLookup(
     email: string,
     currentLookup: Buffer,
   ): Promise<UserRecord | null> {
-    if (!this.options.previousPepper) return null
-    const old = await this.repo.findByLookup(emailLookupHmac(email, this.options.previousPepper))
-    if (!old) return null
-    try {
-      await this.repo.updateEmailLookup(old.id, currentLookup)
-    } catch (err) {
-      // Someone already owns the new value (a second row for the same
-      // address, e.g. created before canonicalization) — leave the old
-      // row untouched and let the current-pepper row win.
-      if (err instanceof UniqueViolationError) return this.repo.findByLookup(currentLookup)
-      throw err
+    for (const candidate of this.legacyLookups(email, currentLookup)) {
+      const old = await this.repo.findByLookup(candidate)
+      if (!old) continue
+      try {
+        await this.repo.updateEmailLookup(old.id, currentLookup)
+      } catch (err) {
+        // Someone already owns the new value (a second row for the same
+        // address, e.g. minted between deploy and re-hash) — leave the
+        // old row untouched and let the current-form row win; the
+        // rehash script's --absorb-empty-duplicates cleans this up.
+        if (err instanceof UniqueViolationError) return this.repo.findByLookup(currentLookup)
+        throw err
+      }
+      return { ...old, emailLookup: currentLookup }
     }
-    return { ...old, emailLookup: currentLookup }
+    return null
   }
 
   async toMeView(record: UserRecord): Promise<MeView> {

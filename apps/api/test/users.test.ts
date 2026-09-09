@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
-import { emailLookupHmac, lookupEquals } from '../src/crypto/email.js'
+import { emailLookupHmac, legacyEmailLookupHmac, lookupEquals } from '../src/crypto/email.js'
 import { FieldCipher } from '../src/crypto/envelope.js'
 import { LocalKek } from '../src/crypto/kek.js'
 import { MemoryUserRepository } from '../src/users/memory-repository.js'
@@ -64,6 +64,48 @@ describe('UserService.ensureUser', () => {
     const again = await service.ensureUser('banned@example.com')
     expect(again.id).toBe(first.id)
     expect(again.status).toBe('suspended')
+  })
+
+  it('finds a row hashed under the pre-alias-collapsing form and re-hashes it on login', async () => {
+    const repo = new MemoryUserRepository()
+    const legacyRow = await repo.create({
+      id: '01900000-0000-7000-8000-000000000001',
+      emailCiphertext: await cipher.encrypt('wei.song@gmail.com'),
+      emailLookup: legacyEmailLookupHmac('wei.song@gmail.com', NEW_PEPPER),
+      displayName: '淞淞',
+      status: 'active',
+    })
+    const service = new UserService(repo, cipher, NEW_PEPPER)
+    const found = await service.ensureUser('Wei.Song@gmail.com')
+    expect(found.id).toBe(legacyRow.id)
+    const stored = (await repo.findById(legacyRow.id))!
+    expect(lookupEquals(stored.emailLookup, emailLookupHmac('weisong@gmail.com', NEW_PEPPER))).toBe(true)
+    // Once migrated, the legacy value no longer resolves and no new row was minted.
+    expect(await repo.findByLookup(legacyEmailLookupHmac('wei.song@gmail.com', NEW_PEPPER))).toBeNull()
+    expect((await repo.listAll()).length).toBe(1)
+  })
+
+  it('when a duplicate already owns the canonical lookup, the legacy row is left untouched and the duplicate wins', async () => {
+    const repo = new MemoryUserRepository()
+    const legacyRow = await repo.create({
+      id: '01900000-0000-7000-8000-000000000002',
+      emailCiphertext: await cipher.encrypt('a.b@gmail.com'),
+      emailLookup: legacyEmailLookupHmac('a.b@gmail.com', NEW_PEPPER),
+      displayName: 'legacy',
+      status: 'active',
+    })
+    const service = new UserService(repo, cipher, NEW_PEPPER)
+    const duplicate = await repo.create({
+      id: '01900000-0000-7000-8000-000000000003',
+      emailCiphertext: await cipher.encrypt('ab@gmail.com'),
+      emailLookup: emailLookupHmac('ab@gmail.com', NEW_PEPPER),
+      displayName: 'dup',
+      status: 'active',
+    })
+    const found = await service.ensureUser('a.b@gmail.com')
+    expect(found.id).toBe(duplicate.id)
+    expect(lookupEquals((await repo.findById(legacyRow.id))!.emailLookup, legacyEmailLookupHmac('a.b@gmail.com', NEW_PEPPER))).toBe(true)
+    expect((await repo.listAll()).length).toBe(2)
   })
 
   it('maps alias spellings of one Gmail address to one account', async () => {
