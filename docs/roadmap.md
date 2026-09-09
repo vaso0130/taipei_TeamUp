@@ -1,6 +1,6 @@
 # Roadmap：M7 多活動與活動管理
 
-狀態（2026-09-09）：**B 活動管理已上線**（任務 2、3、4、7 完成，設計規格見 `docs/design/admin-events.md`）；**A 前端活動層待確認範圍**（任務 5、6、8、9）。對應 ADR-035。
+狀態（2026-09-09）：**B 活動管理已上線**（任務 2、3、4、7，規格 `docs/design/admin-events.md`）；**A 前端活動層已上線**（任務 5、6，規格 `docs/design/landing-and-event-layer.md`）。剩餘：任務 8（文件與 e2e 補齊）、9 已隨部署完成；後台活動切換器另排。對應 ADR-035。
 
 ## 為什麼
 
@@ -55,8 +55,8 @@
 | 2 ✅ | shared：admin events schema／型別／錯誤碼；`draft`／`archived` 狀態原本就在，無需 migration | packages/shared | 2h | 1 |
 | 3 ✅ | api：`EventAdminService`（建立／更新／狀態／複製／匯出／刪除、護欄、audit）＋ `DbEventAdminRepository`；seed CLI 與後台共用 `seed/upsert.ts` | apps/api | 1d | 2 |
 | 4 ✅ | api：`GET /api/events` 只列 open／closed；admin 路由與 zod；24 個路由測試（403、護欄、狀態矩陣、匯出 round-trip） | apps/api | 0.5d | 3 |
-| 5 | web：router 改 `/e/:slug/*` ＋舊路徑 302 守衛；event store 多活動快取；首頁活動選擇 | apps/web | 1d | — |
-| 6 | web：個人檔案多活動參加資料；訊息頁活動標示；後台活動切換器 | apps/web | 0.5d | 5 |
+| 5 ✅ | web：router 改 `/e/:slug/*` ＋舊路徑轉址守衛；event store 多活動快取；滿版入口動畫 `/` ＋活動列表 `/events`；草稿預覽與封存橫幅 | apps/web | 1d | — |
+| 6 ✅ | web：個人檔案多活動參加資料；訊息頁活動標示（後台活動切換器留待後續） | apps/web | 0.5d | 5 |
 | 7 ✅ | web：`/admin/events`（列表、起點選擇、三欄編輯器、字典編輯、狀態卡、匯出 JSON）；已在正式站以 Chrome 走完「範本→草稿→開放→編輯→關閉→封存」 | apps/web | 1.5d | 4 |
 | 8 | e2e 與 Playwright 快照更新；README「換一場活動」改寫成「後台建立活動；JSON 為進階／備份用」；docs/architecture.md 路徑表 | e2e, docs | 0.5d | 5, 7 |
 | 9 | 部署：Hosting 不需重建（不再依賴 `VITE_EVENT_SLUG`）；API 一次部署＋migration；場測驗證 | infra | 0.5d | 8 |
