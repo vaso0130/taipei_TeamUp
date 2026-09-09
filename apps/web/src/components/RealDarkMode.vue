@@ -3,10 +3,11 @@
 // rest of the page falls into actual darkness. Zero dependencies (the
 // CSP allows no external libs): one fixed overlay with a radial
 // gradient hole. pointer-events stays off so the site remains usable
-// in the dark, which is of course the joke.
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+// in the dark, which is of course the joke. Pointer listeners are only
+// attached while the overlay is enabled.
+import { onBeforeUnmount, ref, watch } from 'vue'
 
-defineProps<{ enabled: boolean }>()
+const props = defineProps<{ enabled: boolean }>()
 
 const x = ref(0)
 const y = ref(0)
@@ -16,16 +17,23 @@ function move(e: PointerEvent) {
   y.value = e.clientY
 }
 
-onMounted(() => {
+function attach() {
   x.value = window.innerWidth / 2
   y.value = window.innerHeight / 2
   window.addEventListener('pointermove', move, { passive: true })
   window.addEventListener('pointerdown', move, { passive: true })
-})
-onBeforeUnmount(() => {
+}
+function detach() {
   window.removeEventListener('pointermove', move)
   window.removeEventListener('pointerdown', move)
-})
+}
+
+watch(
+  () => props.enabled,
+  (on) => (on ? attach() : detach()),
+  { immediate: true },
+)
+onBeforeUnmount(detach)
 </script>
 
 <template>

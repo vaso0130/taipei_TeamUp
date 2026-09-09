@@ -1,12 +1,21 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
+import { useAuthStore } from '../stores/auth.js'
 import { useEventStore } from '../stores/event.js'
 import TagChip from '../components/TagChip.vue'
 import { formatDate, formatDateTime } from '../lib/format.js'
 
 const store = useEventStore()
+const auth = useAuthStore()
 const event = computed(() => store.event)
+
+/** Creating a team needs a session: send visitors to login first, then on to the form. */
+const createTeamTarget = computed(() =>
+  auth.isLoggedIn
+    ? { name: 'teams', query: { create: '1' } }
+    : { name: 'profile', query: { next: 'create-team' } },
+)
 
 const memberRule = computed(() => {
   const e = event.value
@@ -43,11 +52,7 @@ const steps = computed(() => [
           <RouterLink to="/teams" class="btn btn-primary">
             瀏覽{{ event.termTeam }}
           </RouterLink>
-          <RouterLink
-            v-if="store.recruitOpen"
-            :to="{ name: 'teams', query: { create: '1' } }"
-            class="btn btn-cta"
-          >
+          <RouterLink v-if="store.recruitOpen" :to="createTeamTarget" class="btn btn-cta">
             建立{{ event.termTeam }}
           </RouterLink>
           <span v-else class="rounded-lg bg-mist px-3 py-2 text-sm text-dim">揪團已截止</span>
@@ -89,7 +94,7 @@ const steps = computed(() => [
           v-if="event.requiresAdultCheck"
           class="mt-4 max-w-xl rounded-lg bg-warn-mist px-4 py-3 text-sm text-warn"
         >
-          未滿 18 歲者，法定代理人同意書由活動主辦單位收取；本平台不收也不儲存同意書。
+          未滿 18 歲請先向主辦單位確認同意書流程。
         </p>
       </section>
 

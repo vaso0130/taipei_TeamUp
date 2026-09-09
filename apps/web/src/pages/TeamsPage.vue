@@ -2,9 +2,11 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import type { TeamDetail, TeamSummary } from '@teamup/shared'
-import { api, ApiError } from '../api/client.js'
+import { api } from '../api/client.js'
+import { classifyLoadError, describeApiError, type LoadFailure } from '../lib/errors.js'
 import { captchaToken } from '../lib/recaptcha.js'
 import EmptyState from '../components/EmptyState.vue'
+import LoadError from '../components/LoadError.vue'
 import TagChip from '../components/TagChip.vue'
 import TeamCard from '../components/TeamCard.vue'
 import { useAuthStore } from '../stores/auth.js'
@@ -16,7 +18,8 @@ const route = useRoute()
 const router = useRouter()
 
 const teams = ref<TeamSummary[]>([])
-const loading = ref(false)
+const loading = ref(true)
+const loadError = ref<LoadFailure | null>(null)
 const myTeam = ref<TeamDetail | null>(null)
 
 // Filters live in the URL so a filtered view can be shared.
@@ -38,14 +41,20 @@ watch(filters, () => {
 })
 
 async function loadTeams() {
-  const slug = eventStore.event?.slug
-  if (!slug) return
   loading.value = true
+  loadError.value = null
+  await eventStore.ensureLoaded()
+  const slug = eventStore.event?.slug
+  if (!slug) {
+    loadError.value = 'failed'
+    loading.value = false
+    return
+  }
   try {
     teams.value = (await api.listTeams(slug, filters)).teams
   } catch (err) {
-    if (!(err instanceof ApiError && err.status === 503)) console.error(err)
     teams.value = []
+    loadError.value = classifyLoadError(err)
   } finally {
     loading.value = false
   }
@@ -55,7 +64,7 @@ async function loadMyTeam() {
   const slug = eventStore.event?.slug
   if (!slug || !auth.token || !auth.isLoggedIn) return
   try {
-    myTeam.value = (await api.myTeam(auth.token, slug)).team
+    myTeam.value = (await api.myTeam(auth.getToken, slug)).team
   } catch {
     myTeam.value = null
   }
@@ -96,24 +105,24 @@ async function createTeam() {
   createError.value = ''
   try {
     const detail = await api.createTeam(
-      auth.token,
+      auth.getToken,
       slug,
       { ...form, name: form.name.trim() },
       await captchaToken('create_team'),
     )
     await router.push({ name: 'team-detail', params: { id: detail.id } })
   } catch (err) {
-    if (err instanceof ApiError && err.code === 'already_in_team') {
-      createError.value = `你已在一個${eventStore.termTeam}中，無法再建立新的`
-    } else if (err instanceof ApiError && err.code === 'recruiting_closed') {
-      createError.value = '揪團已截止，無法建立'
-    } else if (err instanceof ApiError && err.code === 'name_rejected') {
-      createError.value = '名稱未通過自動化篩選，請換一個名稱'
-    } else if (err instanceof ApiError && err.code === 'moderation_unavailable') {
-      createError.value = '自動化篩選暫時無法使用，請稍後再試'
-    } else {
-      createError.value = '建立失敗，請稍後再試'
-    }
+    createError.value = describeApiError(
+      err,
+      { termTeam: eventStore.termTeam, termMember: eventStore.termMember },
+      '建立失敗，請稍後再試',
+      {
+        already_in_team: `你已在一個${eventStore.termTeam}中，無法再建立新的`,
+        recruiting_closed: '揪團已截止，無法建立',
+        name_rejected: '名稱未通過自動化篩選，請換一個名稱',
+        validation_failed: '名稱須為 1–40 個字，簡介最多 1000 字',
+      },
+    )
   } finally {
     creating.value = false
   }
@@ -122,6 +131,8 @@ async function createTeam() {
 const canCreate = computed(
   () => auth.isLoggedIn && eventStore.recruitOpen && !(eventStore.event?.exclusiveMembership && myTeam.value),
 )
+/** Landed on ?create=1 without a session: explain instead of showing nothing. */
+const needsLoginToCreate = computed(() => showCreate.value && !auth.isLoggedIn && !auth.loading)
 </script>
 
 <template>
@@ -134,6 +145,21 @@ const canCreate = computed(
       <button v-if="canCreate" class="btn btn-cta" @click="showCreate = !showCreate">
         {{ showCreate ? '收合表單' : `建立${eventStore.termTeam}` }}
       </button>
+    </div>
+
+    <!-- create requested but not signed in -->
+    <div
+      v-if="needsLoginToCreate"
+      class="card mt-4 flex flex-wrap items-center justify-between gap-3 bg-primary-mist px-5 py-4 text-sm"
+      role="status"
+    >
+      <span>請先登入，登入後即可建立{{ eventStore.termTeam }}。</span>
+      <RouterLink
+        :to="{ name: 'profile', query: { next: 'create-team' } }"
+        class="btn btn-primary text-sm"
+      >
+        前往登入
+      </RouterLink>
     </div>
 
     <!-- my team banner -->
@@ -222,7 +248,7 @@ const canCreate = computed(
     <!-- filters -->
     <div class="mt-6 flex flex-wrap items-center gap-3">
       <label class="text-sm text-dim" for="filter-status">狀態</label>
-      <select id="filter-status" v-model="filters.status" class="field-input !min-h-[40px] w-auto">
+      <select id="filter-status" v-model="filters.status" class="field-input w-auto">
         <option value="">全部</option>
         <option value="recruiting">招募中</option>
         <option value="full">已滿編</option>
@@ -230,7 +256,7 @@ const canCreate = computed(
       </select>
 
       <label class="text-sm text-dim" for="filter-role">缺角色</label>
-      <select id="filter-role" v-model="filters.role" class="field-input !min-h-[40px] w-auto">
+      <select id="filter-role" v-model="filters.role" class="field-input w-auto">
         <option value="">不限</option>
         <option v-for="role in eventStore.detail?.roles ?? []" :key="role.key" :value="role.key">
           {{ role.label }}
@@ -238,7 +264,7 @@ const canCreate = computed(
       </select>
 
       <label class="text-sm text-dim" for="filter-skill">缺技能</label>
-      <select id="filter-skill" v-model="filters.skill" class="field-input !min-h-[40px] w-auto">
+      <select id="filter-skill" v-model="filters.skill" class="field-input w-auto">
         <option value="">不限</option>
         <option
           v-for="skill in eventStore.detail?.skills ?? []"
@@ -251,7 +277,8 @@ const canCreate = computed(
     </div>
 
     <!-- list -->
-    <p v-if="loading" class="mt-6 text-dim">載入中⋯</p>
+    <p v-if="loading" class="mt-6 text-dim" aria-live="polite">載入中⋯</p>
+    <LoadError v-else-if="loadError" class="mt-6" :kind="loadError" @retry="loadTeams" />
     <div v-else-if="teams.length" class="mt-6 grid gap-4 sm:grid-cols-2">
       <TeamCard v-for="team in teams" :key="team.id" :team="team" />
     </div>

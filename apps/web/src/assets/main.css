@@ -4,6 +4,7 @@
  * Taipei TeamUp design tokens — see design-system/taipei-teamup/MASTER.md.
  * Grounded in Taipei's transit signage: paper ground, ink-teal text,
  * MRT-line dot accents. Flat design: color and line, no shadows.
+ * Every text/background pairing below clears WCAG AA (4.5:1).
  */
 @theme {
   --color-paper: #f7f8f6;
@@ -11,29 +12,42 @@
   --color-primary: #0e7a6a;
   --color-primary-deep: #0a5c50;
   --color-primary-mist: #e2efec;
+  --color-on-primary: #ffffff;
   --color-cta: #c2410c;
   --color-cta-deep: #9a3412;
+  --color-on-cta: #ffffff;
   --color-line: #d9e2de;
   --color-card: #ffffff;
   --color-mist: #edf2ef;
   --color-dim: #5a6b66;
-  --color-ok: #2b8a3e;
+  --color-ok: #1f6f31;
   --color-ok-mist: #e3f2e8;
-  --color-warn: #9a6700;
+  --color-warn: #805600;
   --color-warn-mist: #fdf3d9;
   --color-danger: #c92a2a;
   --color-danger-mist: #fdecec;
 
   --font-sans: 'Noto Sans TC', 'PingFang TC', 'Microsoft JhengHei', sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
-  --font-brand: 'LXGW WenKai TC', 'Noto Sans TC', serif;
+  /* Brand 配 roundel: system 楷體 where available, otherwise the body face. */
+  --font-brand: 'Kaiti TC', 'BiauKai', 'DFKai-SB', 'STKaiti', 'KaiTi', 'Noto Sans TC', serif;
+}
+
+:root {
+  color-scheme: light;
 }
 
 /*
  * Night palette — the same signage system after dark: ink ground,
- * brighter teal for contrast, hover shades flip lighter. Applied by
- * toggling .dark on <html> (the toggle in the header; the first press
- * is a prank — see RealDarkMode.vue).
+ * brighter teal for contrast, hover shades flip lighter. Filled buttons
+ * switch to dark text so they stay above 4.5:1 on the brighter fills.
+ *
+ * Applied two ways, with identical values (keep both blocks in sync):
+ *   1. `.dark` on <html> — explicit choice from the header toggle.
+ *   2. prefers-color-scheme: dark when no explicit choice was stored
+ *      (`.light` marks an explicit light choice and wins over the OS).
+ * The media block makes the OS preference take effect at first paint
+ * without any inline script (the site's CSP is script-src 'self').
  */
 :root.dark {
   color-scheme: dark;
@@ -42,8 +56,10 @@
   --color-primary: #2aa38d;
   --color-primary-deep: #4fc2ab;
   --color-primary-mist: #17332d;
+  --color-on-primary: #0b1614;
   --color-cta: #ea7c3c;
   --color-cta-deep: #f59e6b;
+  --color-on-cta: #1a0f08;
   --color-line: #2a3a36;
   --color-card: #172220;
   --color-mist: #1d2a27;
@@ -54,6 +70,30 @@
   --color-warn-mist: #322910;
   --color-danger: #f07575;
   --color-danger-mist: #3a1c1c;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) {
+    color-scheme: dark;
+    --color-paper: #101816;
+    --color-ink: #e4eeea;
+    --color-primary: #2aa38d;
+    --color-primary-deep: #4fc2ab;
+    --color-primary-mist: #17332d;
+    --color-on-primary: #0b1614;
+    --color-cta: #ea7c3c;
+    --color-cta-deep: #f59e6b;
+    --color-on-cta: #1a0f08;
+    --color-line: #2a3a36;
+    --color-card: #172220;
+    --color-mist: #1d2a27;
+    --color-dim: #8fa39d;
+    --color-ok: #58c072;
+    --color-ok-mist: #16301f;
+    --color-warn: #dcb14e;
+    --color-warn-mist: #322910;
+    --color-danger: #f07575;
+    --color-danger-mist: #3a1c1c;
+  }
 }
 
 body {
@@ -100,14 +140,14 @@ body {
   }
   .btn-primary {
     background-color: var(--color-primary);
-    color: #ffffff;
+    color: var(--color-on-primary);
   }
   .btn-primary:hover:not(:disabled) {
     background-color: var(--color-primary-deep);
   }
   .btn-cta {
     background-color: var(--color-cta);
-    color: #ffffff;
+    color: var(--color-on-cta);
   }
   .btn-cta:hover:not(:disabled) {
     background-color: var(--color-cta-deep);
@@ -129,6 +169,27 @@ body {
   .btn-danger:hover:not(:disabled) {
     border-color: var(--color-danger);
     background-color: var(--color-danger-mist);
+  }
+
+  /* Header/footer text links: 44px tall hit area without extra visual weight. */
+  .nav-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0 0.5rem;
+    border-radius: 0.5rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    white-space: nowrap;
+    color: var(--color-dim);
+    transition: color 150ms ease, background-color 150ms ease;
+  }
+  .nav-link:hover {
+    color: var(--color-ink);
+  }
+  .nav-link-active {
+    color: var(--color-primary-deep);
+    background-color: var(--color-primary-mist);
   }
 
   /* Station-badge chip: MRT-line dot + label. Always allowed to wrap. */
@@ -160,6 +221,11 @@ body {
   .chip-selected {
     border-color: var(--color-primary);
     background-color: var(--color-primary-mist);
+  }
+  /* Radio chips keep the input sr-only; draw its focus ring on the label. */
+  .chip:has(input:focus-visible) {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
   }
 
   /* Signboard card: flat, bordered, colored top rule carries status. */

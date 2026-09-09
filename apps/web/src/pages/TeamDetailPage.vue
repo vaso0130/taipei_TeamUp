@@ -2,8 +2,10 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import type { ApplicationView, TeamDetail } from '@teamup/shared'
-import { api, ApiError } from '../api/client.js'
+import { api } from '../api/client.js'
+import { classifyLoadError, describeApiError, type LoadFailure } from '../lib/errors.js'
 import { captchaToken } from '../lib/recaptcha.js'
+import LoadError from '../components/LoadError.vue'
 import ReportDialog from '../components/ReportDialog.vue'
 import TagChip from '../components/TagChip.vue'
 import { formatDate } from '../lib/format.js'
@@ -18,26 +20,24 @@ const auth = useAuthStore()
 const teamId = computed(() => String(route.params.id))
 const team = ref<TeamDetail | null>(null)
 const loading = ref(true)
-const notFound = ref(false)
+const loadError = ref<LoadFailure | null>(null)
 const pendingApplications = ref<ApplicationView[]>([])
+
+const errorCtx = () => ({ termTeam: eventStore.termTeam, termMember: eventStore.termMember })
 
 async function load() {
   loading.value = true
-  notFound.value = false
+  loadError.value = null
   try {
-    team.value = await api.getTeam(teamId.value, auth.token ?? undefined)
+    team.value = await api.getTeam(teamId.value, auth.token ? auth.getToken : undefined)
     if (team.value.viewerIsOwner && auth.token) {
       pendingApplications.value = (
-        await api.listTeamApplications(auth.token, teamId.value)
+        await api.listTeamApplications(auth.getToken, teamId.value)
       ).applications
     }
   } catch (err) {
-    if (err instanceof ApiError && (err.status === 404 || err.status === 503)) {
-      notFound.value = true
-    } else {
-      console.error(err)
-      notFound.value = true
-    }
+    team.value = null
+    loadError.value = classifyLoadError(err)
   } finally {
     loading.value = false
   }
@@ -74,7 +74,7 @@ const isSelf = (userId: string) => auth.me?.userId === userId
 const reportOpen = ref(false)
 async function submitTeamReport(reason: string) {
   if (!auth.token || !team.value) return
-  await api.reportTeam(auth.token, team.value.id, reason)
+  await api.reportTeam(auth.getToken, team.value.id, reason)
 }
 
 // ---- apply ----
@@ -97,7 +97,7 @@ async function submitApply() {
   applyFeedback.value = null
   try {
     await api.applyToTeam(
-      auth.token,
+      auth.getToken,
       team.value.id,
       applyMessage.value,
       await captchaToken('apply_team'),
@@ -105,17 +105,16 @@ async function submitApply() {
     applyFeedback.value = { kind: 'ok', text: '申請已送出，等待對方回覆。' }
     applyMessage.value = ''
   } catch (err) {
-    const code = err instanceof ApiError ? err.code : ''
     applyFeedback.value = {
       kind: 'error',
-      text:
-        code === 'already_in_team'
-          ? `你已在其他${eventStore.termTeam}中，無法申請`
-          : code === 'duplicate_application'
-            ? '你已送出過申請，等待回覆中'
-            : code === 'not_recruiting' || code === 'recruiting_closed'
-              ? '這個' + eventStore.termTeam + '目前不接受申請'
-              : '申請失敗，請稍後再試',
+      text: describeApiError(err, errorCtx(), '申請失敗，請稍後再試', {
+        already_in_team: `你已在其他${eventStore.termTeam}中，無法申請`,
+        already_in_this_team: `你已經是這個${eventStore.termTeam}的${eventStore.termMember}`,
+        duplicate_application: '你已送出過申請，等待回覆中',
+        not_recruiting: `這個${eventStore.termTeam}目前不接受申請`,
+        recruiting_closed: '揪團已截止，無法再申請',
+        validation_failed: '附言最多 500 字',
+      }),
     }
   } finally {
     applying.value = false
@@ -128,16 +127,13 @@ async function respond(applicationId: string, action: 'accept' | 'reject') {
   if (!auth.token) return
   respondFeedback.value = ''
   try {
-    await api.respondApplication(auth.token, applicationId, action)
+    await api.respondApplication(auth.getToken, applicationId, action)
     await load()
   } catch (err) {
-    const code = err instanceof ApiError ? err.code : ''
-    respondFeedback.value =
-      code === 'team_full'
-        ? `${eventStore.termTeam}已滿，無法再接受`
-        : code === 'already_in_team'
-          ? `對方已加入其他${eventStore.termTeam}`
-          : '操作失敗，請稍後再試'
+    respondFeedback.value = describeApiError(err, errorCtx(), '操作失敗，請稍後再試', {
+      team_full: `${eventStore.termTeam}已滿，無法再接受`,
+      already_in_team: `對方已加入其他${eventStore.termTeam}`,
+    })
   }
 }
 
@@ -170,7 +166,10 @@ async function saveContacts() {
     rank: i + 1,
   }))
   if (contacts.some((c) => !c.userId)) {
-    contactsFeedback.value = { kind: 'error', text: '每個聯絡人位置都要選一位成員' }
+    contactsFeedback.value = {
+      kind: 'error',
+      text: `每個聯絡人位置都要選一位${eventStore.termMember}`,
+    }
     return
   }
   if (new Set(contacts.map((c) => c.userId)).size !== contacts.length) {
@@ -180,11 +179,16 @@ async function saveContacts() {
   savingContacts.value = true
   contactsFeedback.value = null
   try {
-    await api.putContacts(auth.token, team.value.id, { contacts })
+    await api.putContacts(auth.getToken, team.value.id, { contacts })
     contactsFeedback.value = { kind: 'ok', text: '聯絡人已更新' }
     await load()
-  } catch {
-    contactsFeedback.value = { kind: 'error', text: '儲存失敗，請稍後再試' }
+  } catch (err) {
+    contactsFeedback.value = {
+      kind: 'error',
+      text: describeApiError(err, errorCtx(), '儲存失敗，請稍後再試', {
+        validation_failed: `聯絡人必須是目前的${eventStore.termMember}，且不能重複`,
+      }),
+    }
   } finally {
     savingContacts.value = false
   }
@@ -212,11 +216,13 @@ async function saveNeeds() {
   savingNeeds.value = true
   needsFeedback.value = ''
   try {
-    await api.updateTeam(auth.token, team.value.id, { ...editNeeds })
+    await api.updateTeam(auth.getToken, team.value.id, { ...editNeeds })
     needsFeedback.value = '已儲存'
     await load()
-  } catch {
-    needsFeedback.value = '儲存失敗，請稍後再試'
+  } catch (err) {
+    needsFeedback.value = describeApiError(err, errorCtx(), '儲存失敗，請稍後再試', {
+      validation_failed: '簡介最多 1000 字',
+    })
   } finally {
     savingNeeds.value = false
   }
@@ -226,11 +232,12 @@ async function toggleStatus() {
   if (!auth.token || !team.value) return
   const next = team.value.status === 'closed' ? 'recruiting' : 'closed'
   try {
-    await api.updateTeam(auth.token, team.value.id, { status: next })
+    await api.updateTeam(auth.getToken, team.value.id, { status: next })
     await load()
   } catch (err) {
-    needsFeedback.value =
-      err instanceof ApiError && err.code === 'team_full' ? '已滿編，無法重新開放' : '操作失敗'
+    needsFeedback.value = describeApiError(err, errorCtx(), '操作失敗，請稍後再試', {
+      team_full: '已滿編，無法重新開放',
+    })
   }
 }
 
@@ -241,44 +248,55 @@ async function removeTeam() {
   if (!window.confirm(`確定要刪除「${team.value.name}」嗎？此動作無法復原。`)) return
   deleting.value = true
   try {
-    await api.deleteTeam(auth.token, team.value.id)
+    await api.deleteTeam(auth.getToken, team.value.id)
     await router.push({ name: 'teams' })
   } catch (err) {
     deleting.value = false
-    needsFeedback.value =
-      err instanceof ApiError && err.code === 'team_not_empty'
-        ? '還有其他成員在隊上，請先請成員退出再刪除'
-        : '刪除失敗，請稍後再試'
+    needsFeedback.value = describeApiError(err, errorCtx(), '刪除失敗，請稍後再試', {
+      team_not_empty: `還有其他${eventStore.termMember}在${eventStore.termTeam}裡，請先請他們退出再刪除`,
+    })
   }
 }
 
 // ---- member: leave ----
 const leaving = ref(false)
+const leaveError = ref('')
 async function leave() {
   if (!auth.token || !team.value) return
   if (!window.confirm(`確定要離開「${team.value.name}」嗎？`)) return
   leaving.value = true
   try {
-    await api.leaveTeam(auth.token, team.value.id)
+    await api.leaveTeam(auth.getToken, team.value.id)
     await router.push({ name: 'teams' })
-  } catch {
+  } catch (err) {
     leaving.value = false
+    leaveError.value = describeApiError(err, errorCtx(), '離開失敗，請稍後再試')
   }
 }
 
-const applicationMessageOf = (a: ApplicationView) =>
-  a.message ?? (a.messageVisibility === 'pending_review' ? '（附言審核中）' : null)
+const applicationMessageOf = (a: ApplicationView) => {
+  if (a.message) return a.message
+  if (a.status === 'blocked' || a.messageVisibility === 'blocked') return '（附言未通過審核）'
+  if (a.messageVisibility === 'pending_review') return '（附言審核中）'
+  return null
+}
 </script>
 
 <template>
   <div>
-    <p v-if="loading" class="text-dim">載入中⋯</p>
+    <p v-if="loading" class="text-dim" aria-live="polite">載入中⋯</p>
 
-    <template v-else-if="notFound || !team">
-      <div class="card p-8 text-center">
-        <p class="font-medium">找不到這個{{ eventStore.termTeam }}</p>
-        <RouterLink to="/teams" class="btn btn-quiet mt-4">回列表</RouterLink>
-      </div>
+    <template v-else-if="loadError || !team">
+      <LoadError
+        :kind="loadError ?? 'failed'"
+        :title="loadError === 'not_found' ? `找不到這個${eventStore.termTeam}` : undefined"
+        :hint="loadError === 'not_found' ? '它可能已被刪除，或網址有誤。' : undefined"
+        @retry="load"
+      >
+        <template #action>
+          <RouterLink to="/teams" class="btn btn-quiet">回列表</RouterLink>
+        </template>
+      </LoadError>
     </template>
 
     <template v-else>
@@ -313,6 +331,12 @@ const applicationMessageOf = (a: ApplicationView) =>
             class="mt-2 text-sm text-warn"
           >
             簡介審核中，通過後其他人才看得到。
+          </p>
+          <p
+            v-else-if="team.viewerIsOwner && team.pitchVisibility === 'blocked'"
+            class="mt-2 text-sm text-danger"
+          >
+            簡介未通過審核，其他人看不到。若認為誤判，請透過 GitHub Issues 或活動主辦單位聯繫。
           </p>
 
           <ul
@@ -352,14 +376,15 @@ const applicationMessageOf = (a: ApplicationView) =>
             </span>
             <RouterLink
               v-if="team.viewerIsMember && !isSelf(member.userId)"
-              :to="{ name: 'messages', query: { to: member.userId, name: member.displayName } }"
-              class="ml-auto text-sm font-medium text-primary-deep hover:underline"
+              :to="{ name: 'messages', query: { to: member.userId, team: team.id } }"
+              class="ml-auto inline-flex min-h-11 items-center px-2 text-sm font-medium text-primary-deep hover:underline"
             >
               傳訊息
             </RouterLink>
           </li>
         </ul>
 
+        <p v-if="leaveError" class="mt-3 text-sm text-danger" role="alert">{{ leaveError }}</p>
         <button
           v-if="team.viewerIsMember && !team.viewerIsOwner"
           class="btn btn-danger mt-4"
@@ -422,10 +447,10 @@ const applicationMessageOf = (a: ApplicationView) =>
                 </p>
               </div>
               <div v-if="a.direction === 'apply'" class="flex gap-2">
-                <button class="btn btn-primary !min-h-[40px] !px-4 text-sm" @click="respond(a.id, 'accept')">
+                <button class="btn btn-primary !px-4 text-sm" @click="respond(a.id, 'accept')">
                   接受
                 </button>
-                <button class="btn btn-quiet !min-h-[40px] !px-4 text-sm" @click="respond(a.id, 'reject')">
+                <button class="btn btn-quiet !px-4 text-sm" @click="respond(a.id, 'reject')">
                   婉拒
                 </button>
               </div>

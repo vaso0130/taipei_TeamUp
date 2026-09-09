@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { RouterLink, useRouter } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 import type { ParticipationInput } from '@teamup/shared'
 import { api, ApiError } from '../api/client.js'
+import { describeApiError } from '../lib/errors.js'
+import { emailToUnicode } from '../lib/punycode.js'
 import TagChip from '../components/TagChip.vue'
 import { useAuthStore } from '../stores/auth.js'
 import { useEventStore } from '../stores/event.js'
@@ -10,16 +12,37 @@ import { useEventStore } from '../stores/event.js'
 const auth = useAuthStore()
 const eventStore = useEventStore()
 const router = useRouter()
+const route = useRoute()
 
-onMounted(() => void eventStore.ensureLoaded())
+onMounted(() => {
+  void eventStore.ensureLoaded()
+  // The login page is where a returning Firebase session is worth restoring.
+  if (auth.usesFirebase) void auth.ensureFirebase()
+})
+
+const errorCtx = () => ({ termTeam: eventStore.termTeam, termMember: eventStore.termMember })
+
+/** Arrived from a "create team" CTA while signed out: explain, then continue after login. */
+const nextIsCreateTeam = computed(() => route.query.next === 'create-team')
+watch(
+  () => auth.isLoggedIn,
+  (loggedIn) => {
+    if (loggedIn && nextIsCreateTeam.value) {
+      void router.replace({ name: 'teams', query: { create: '1' } })
+    }
+  },
+  { immediate: true },
+)
 
 // ---- data rights: export & delete (spec §6.5) ----
 const exporting = ref(false)
+const accountMessage = ref('')
 async function exportData() {
   if (!auth.token) return
   exporting.value = true
+  accountMessage.value = ''
   try {
-    const data = await api.exportMe(auth.token)
+    const data = await api.exportMe(auth.getToken)
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -27,6 +50,8 @@ async function exportData() {
     a.download = 'teamup-data-export.json'
     a.click()
     URL.revokeObjectURL(url)
+  } catch (err) {
+    accountMessage.value = describeApiError(err, errorCtx(), '匯出失敗，請稍後再試')
   } finally {
     exporting.value = false
   }
@@ -36,16 +61,19 @@ const deleting = ref(false)
 async function deleteAccount() {
   if (!auth.token) return
   const confirmed = window.confirm(
-    '確定要刪除帳號嗎？\n\n這會立即退出你目前所屬的' +
-      (eventStore.termTeam ?? '隊伍') +
-      '（若你是發起人，會交棒給最早加入的成員）、撤回進行中的申請，內容立即隱藏，30 天後永久刪除。',
+    `確定要刪除帳號嗎？\n\n這會立即退出你目前所屬的${eventStore.termTeam}` +
+      `（若你是發起人，會交棒給最早加入的${eventStore.termMember}）、撤回進行中的申請，` +
+      '內容立即隱藏，30 天後永久刪除。之後以同一 Email 再登入會建立全新的空白帳號。',
   )
   if (!confirmed) return
   deleting.value = true
+  accountMessage.value = ''
   try {
-    await api.deleteMe(auth.token)
+    await api.deleteMe(auth.getToken)
     auth.logout()
     await router.push('/')
+  } catch (err) {
+    accountMessage.value = describeApiError(err, errorCtx(), '刪除失敗，請稍後再試')
   } finally {
     deleting.value = false
   }
@@ -56,13 +84,22 @@ const loginEmail = ref('')
 const isDevBuild = import.meta.env.DEV
 /**
  * Sign-in links come from noreply@<authDomain> by default; a verified
- * custom sending domain overrides it via VITE_MAIL_SENDER.
+ * custom sending domain overrides it via VITE_MAIL_SENDER. A punycode
+ * domain (xn--…) is shown alongside its Unicode form so it does not read
+ * like phishing; VITE_MAIL_SENDER_DISPLAY overrides the readable form.
  */
 const mailSender =
   import.meta.env.VITE_MAIL_SENDER ||
   (import.meta.env.VITE_FIREBASE_AUTH_DOMAIN
     ? `noreply@${import.meta.env.VITE_FIREBASE_AUTH_DOMAIN}`
     : '')
+const mailSenderDisplay = import.meta.env.VITE_MAIL_SENDER_DISPLAY || emailToUnicode(mailSender)
+const mailSenderHint = computed(() => {
+  if (!mailSender) return ''
+  return mailSenderDisplay !== mailSender
+    ? `${mailSenderDisplay}（實際地址 ${mailSender}）`
+    : mailSender
+})
 
 // ---- display name ----
 const displayName = ref('')
@@ -80,19 +117,17 @@ async function saveDisplayName() {
   savingName.value = true
   nameMessage.value = ''
   try {
-    await api.updateMe(auth.token, displayName.value)
+    await api.updateMe(auth.getToken, displayName.value)
     await auth.fetchMe()
     nameMessage.value = '已儲存'
   } catch (err) {
-    const code = err instanceof ApiError ? err.code : ''
-    nameMessage.value =
-      code === 'name_rejected'
-        ? '暱稱未通過自動化篩選，請換一個'
-        : code === 'moderation_unavailable'
-          ? '自動化篩選暫時無法使用，請稍後再試'
-          : err instanceof ApiError && err.status === 400
-            ? '暱稱須為 1–30 個字'
-            : '儲存失敗，請稍後再試'
+    nameMessage.value = describeApiError(err, errorCtx(), '儲存失敗，請稍後再試', {
+      name_rejected: '暱稱未通過自動化篩選，請換一個',
+      validation_failed: '暱稱須為 1–30 個字',
+    })
+    if (err instanceof ApiError && err.status === 400 && err.code !== 'validation_failed') {
+      nameMessage.value = '暱稱須為 1–30 個字'
+    }
   } finally {
     savingName.value = false
   }
@@ -113,12 +148,19 @@ const customTagsText = ref('')
 const blurbVisibility = ref<string | null>(null)
 const loadedParticipation = ref(false)
 
+/** Buffer cap: every allowed tag at max length plus a separator each. */
+const customTagsMaxLength = computed(() => {
+  const e = event.value
+  if (!e) return undefined
+  return e.maxCustomTags * (e.customTagMaxLength + 1)
+})
+
 watch(
   [() => auth.me, event],
   async ([me, e]) => {
     if (!me || !e || !auth.token || loadedParticipation.value) return
     loadedParticipation.value = true
-    const existing = await api.getParticipation(auth.token, e.slug).catch(() => null)
+    const existing = await api.getParticipation(auth.getToken, e.slug).catch(() => null)
     if (existing) {
       form.intent = existing.intent
       form.preferredRoles = [...existing.preferredRoles]
@@ -145,7 +187,6 @@ const formMessage = ref<{ kind: 'ok' | 'error'; text: string } | null>(null)
 async function saveParticipation() {
   const e = event.value
   if (!auth.token || !e) return
-  savingForm.value = true
   formMessage.value = null
   // Parse the tag buffer: comma (half/full width) or 、 separated.
   form.customTags = [
@@ -156,20 +197,27 @@ async function saveParticipation() {
         .filter((t) => t.length > 0),
     ),
   ]
+  const tagRule = `自訂標籤最多 ${e.maxCustomTags} 個、每個最長 ${e.customTagMaxLength} 字`
+  if (
+    form.customTags.length > e.maxCustomTags ||
+    form.customTags.some((t) => t.length > e.customTagMaxLength)
+  ) {
+    formMessage.value = { kind: 'error', text: tagRule }
+    return
+  }
+  savingForm.value = true
   try {
-    const view = await api.putParticipation(auth.token, e.slug, { ...form })
+    const view = await api.putParticipation(auth.getToken, e.slug, { ...form })
     blurbVisibility.value = view.blurbVisibility
     formMessage.value = { kind: 'ok', text: '已儲存' }
   } catch (err) {
-    const code = err instanceof ApiError ? err.code : ''
     formMessage.value = {
       kind: 'error',
-      text:
-        code === 'adult_check_required'
-          ? '請先回答是否年滿 18 歲'
-          : code === 'invalid_custom_tags'
-            ? `自訂標籤最多 ${event.value?.maxCustomTags} 個、每個最長 ${event.value?.customTagMaxLength} 字`
-            : '儲存失敗，請稍後再試',
+      text: describeApiError(err, errorCtx(), '儲存失敗，請稍後再試', {
+        adult_check_required: '請先回答是否年滿 18 歲',
+        invalid_custom_tags: tagRule,
+        validation_failed: '自我介紹最多 500 字，請檢查欄位內容',
+      }),
     }
   } finally {
     savingForm.value = false
@@ -177,7 +225,7 @@ async function saveParticipation() {
 }
 
 const intentOptions = computed(() => {
-  const termTeam = event.value?.termTeam ?? '隊伍'
+  const termTeam = eventStore.termTeam
   return [
     { value: 'looking_for_team', label: `我想找${termTeam}`, hint: '會出現在「找人」列表' },
     { value: 'has_team', label: `我已有${termTeam}`, hint: '' },
@@ -191,6 +239,13 @@ const intentOptions = computed(() => {
     <!-- not logged in -->
     <section v-if="!auth.isLoggedIn" class="card p-6" aria-labelledby="login-title">
       <h1 id="login-title" class="text-xl font-black">登入</h1>
+      <p
+        v-if="nextIsCreateTeam"
+        class="mt-3 rounded-lg bg-primary-mist px-4 py-3 text-sm text-primary-deep"
+        role="status"
+      >
+        登入後即可建立{{ eventStore.termTeam }}，登入完成會直接帶你到建立表單。
+      </p>
       <p v-if="auth.error" class="mt-3 rounded-lg bg-warn-mist px-4 py-3 text-sm text-warn" role="alert">
         {{ auth.error }}
       </p>
@@ -214,21 +269,22 @@ const intentOptions = computed(() => {
             或
             <span class="h-px flex-1 bg-line"></span>
           </div>
-          <form class="flex flex-wrap gap-2" @submit.prevent="auth.sendEmailLink(loginEmail)">
+          <form class="flex flex-col gap-2 sm:flex-row" @submit.prevent="auth.sendEmailLink(loginEmail)">
             <label class="sr-only" for="login-email">Email</label>
             <input
               id="login-email"
               v-model="loginEmail"
               type="email"
               required
+              autocomplete="email"
               placeholder="you@example.com"
-              class="field-input flex-1"
+              class="field-input min-w-0 flex-1"
             />
-            <button type="submit" class="btn btn-quiet">寄送登入連結</button>
+            <button type="submit" class="btn btn-quiet shrink-0">寄送登入連結</button>
           </form>
           <p v-if="auth.emailLinkSent" class="rounded-lg bg-ok-mist px-4 py-3 text-sm text-ok" role="status">
             登入連結已寄出。若收件匣沒看到，請檢查<strong>垃圾郵件</strong>
-            <template v-if="mailSender">（寄件者為 {{ mailSender }}）</template>，並將其標示為非垃圾郵件。
+            <template v-if="mailSenderHint">（寄件者為 {{ mailSenderHint }}）</template>，並將其標示為非垃圾郵件。
           </p>
         </div>
       </template>
@@ -237,17 +293,18 @@ const intentOptions = computed(() => {
           本機開發模式：輸入任一 Email 即可登入（後端 <code class="font-mono">AUTH_PROVIDER=dev</code>）。
           正式環境將使用 Google 登入與 Email 連結登入。
         </p>
-        <form class="mt-4 flex max-w-md flex-wrap gap-2" @submit.prevent="auth.devLogin(loginEmail)">
+        <form class="mt-4 flex max-w-md flex-col gap-2 sm:flex-row" @submit.prevent="auth.devLogin(loginEmail)">
           <label class="sr-only" for="login-email">Email</label>
           <input
             id="login-email"
             v-model="loginEmail"
             type="email"
             required
+            autocomplete="email"
             placeholder="you@example.com"
-            class="field-input flex-1"
+            class="field-input min-w-0 flex-1"
           />
-          <button type="submit" class="btn btn-primary">登入</button>
+          <button type="submit" class="btn btn-primary shrink-0">登入</button>
         </form>
       </template>
       <p v-else class="mt-3 text-dim">登入功能即將開放。</p>
@@ -261,7 +318,7 @@ const intentOptions = computed(() => {
             <h1 id="account-title" class="text-xl font-black">我的帳號</h1>
             <p class="mt-1 font-mono text-sm text-dim">{{ auth.me?.emailHint }}</p>
           </div>
-          <button class="btn btn-quiet !min-h-[40px] text-sm" @click="auth.logout()">登出</button>
+          <button class="btn btn-quiet text-sm" @click="auth.logout()">登出</button>
         </div>
         <div class="mt-4 flex max-w-md flex-wrap items-end gap-2">
           <div class="flex-1">
@@ -274,13 +331,14 @@ const intentOptions = computed(() => {
         <p class="field-hint">用暱稱就好，不需要真名。儲存時會經過自動化篩選確認合規（約需數秒）。</p>
 
         <div class="mt-6 flex flex-wrap gap-3 border-t border-line pt-4">
-          <button class="btn btn-quiet !min-h-[40px] text-sm" :disabled="exporting" @click="exportData">
+          <button class="btn btn-quiet text-sm" :disabled="exporting" @click="exportData">
             {{ exporting ? '匯出中⋯' : '匯出我的資料（JSON）' }}
           </button>
-          <button class="btn btn-danger !min-h-[40px] text-sm" :disabled="deleting" @click="deleteAccount">
-            刪除帳號
+          <button class="btn btn-danger text-sm" :disabled="deleting" @click="deleteAccount">
+            {{ deleting ? '刪除中⋯' : '刪除帳號' }}
           </button>
         </div>
+        <p v-if="accountMessage" class="field-error" role="alert">{{ accountMessage }}</p>
       </section>
 
       <section v-if="event" class="card p-6" aria-labelledby="participation-title">
@@ -359,6 +417,9 @@ const intentOptions = computed(() => {
             placeholder="介紹一下自己，讓別人知道你想做什麼"
           ></textarea>
           <p id="blurb-hint" class="field-hint">發布前會經過自動化風險檢測，通過後才公開。</p>
+          <p v-if="blurbVisibility === 'blocked'" class="field-hint text-danger">
+            目前的自我介紹未通過審核，其他人看不到。若認為誤判，請透過 GitHub Issues 或活動主辦單位聯繫。
+          </p>
 
           <template v-if="(event?.maxCustomTags ?? 0) > 0">
             <label class="field-label mt-4" for="custom-tags">
@@ -369,6 +430,7 @@ const intentOptions = computed(() => {
               v-model="customTagsText"
               class="field-input"
               type="text"
+              :maxlength="customTagsMaxLength"
               :placeholder="'例如：Rust、Godot、手語（最多 ' + event!.maxCustomTags + ' 個，以逗號或頓號分隔）'"
               aria-describedby="custom-tags-hint"
             />

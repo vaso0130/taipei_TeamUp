@@ -12,6 +12,7 @@ import type {
 } from '@teamup/shared'
 import { api, ApiError } from '../api/client.js'
 import EmptyState from '../components/EmptyState.vue'
+import ModalShell from '../components/ModalShell.vue'
 import { formatDateTime } from '../lib/format.js'
 import { useAuthStore } from '../stores/auth.js'
 import { useEventStore } from '../stores/event.js'
@@ -48,7 +49,7 @@ const unprocessedRiskCount = computed(
 
 const TABS = computed(() => [
   { key: 'stats' as const, label: '平台總覽' },
-  { key: 'users' as const, label: `成員（${users.value.length}）` },
+  { key: 'users' as const, label: `帳號（${users.value.length}）` },
   { key: 'teams' as const, label: `${eventStore.termTeam}（${teams.value.length}）` },
   { key: 'pending' as const, label: `待人工審核（${items.value.length}）` },
   { key: 'risk' as const, label: `風險訊息（${unprocessedRiskCount.value}）` },
@@ -60,26 +61,27 @@ const USER_STATUS_LABEL: Record<string, string> = {
   deleted: '已刪除',
 }
 
-const INTENT_LABEL: Record<string, string> = {
-  looking_for_team: '找隊伍中',
-  has_team: '已有隊伍',
+// Event vocabulary (termTeam) is data, so these labels are computed.
+const INTENT_LABEL = computed<Record<string, string>>(() => ({
+  looking_for_team: `找${eventStore.termTeam}中`,
+  has_team: `已有${eventStore.termTeam}`,
   browsing: '先看看',
-}
+}))
 const TEAM_STATUS_LABEL: Record<string, string> = {
   recruiting: '招募中',
   full: '已滿編',
   closed: '已關閉',
 }
-const loading = ref(false)
+const loading = ref(true)
 const forbidden = ref(false)
 const feedback = ref('')
 
-const TYPE_LABEL: Record<string, string> = {
+const TYPE_LABEL = computed<Record<string, string>>(() => ({
   participant_blurb: '自我介紹',
-  team_pitch: '隊伍簡介',
+  team_pitch: `${eventStore.termTeam}簡介`,
   application_message: '申請/邀請附言',
   message: '站內訊息',
-}
+}))
 
 const RISK_LABEL: Record<string, string> = { low: '低', medium: '中', high: '高' }
 const RISK_CLASS: Record<string, string> = {
@@ -95,17 +97,20 @@ const REASON_LABEL: Record<string, string> = {
 }
 
 async function load() {
-  if (!auth.token) return
+  if (!auth.token) {
+    loading.value = false
+    return
+  }
   loading.value = true
   forbidden.value = false
   try {
     const slug = eventStore.event?.slug
     const [pending, risk, overview, roster, teamList] = await Promise.all([
-      api.adminListPending(auth.token),
-      api.adminListRisk(auth.token),
-      slug ? api.adminStats(auth.token, slug) : Promise.resolve(null),
-      slug ? api.adminListUsers(auth.token, slug) : Promise.resolve({ items: [] }),
-      slug ? api.adminListTeams(auth.token, slug) : Promise.resolve({ items: [] }),
+      api.adminListPending(auth.getToken),
+      api.adminListRisk(auth.getToken),
+      slug ? api.adminStats(auth.getToken, slug) : Promise.resolve(null),
+      slug ? api.adminListUsers(auth.getToken, slug) : Promise.resolve({ items: [] }),
+      slug ? api.adminListTeams(auth.getToken, slug) : Promise.resolve({ items: [] }),
     ])
     items.value = pending.items
     riskItems.value = risk.items
@@ -132,7 +137,7 @@ async function decide(item: PendingModerationItem, action: 'approve' | 'block') 
   if (!auth.token) return
   feedback.value = ''
   try {
-    await api.adminDecide(auth.token, { target: item.target, action })
+    await api.adminDecide(auth.getToken, { target: item.target, action })
     await load()
   } catch {
     feedback.value = '操作失敗，請稍後再試'
@@ -147,7 +152,7 @@ async function reviewThread(threadId: string) {
   threadLoading.value = true
   history.value = null
   try {
-    openThread.value = await api.adminGetThread(auth.token, threadId)
+    openThread.value = await api.adminGetThread(auth.getToken, threadId)
   } catch {
     feedback.value = '載入對話失敗'
   } finally {
@@ -159,7 +164,7 @@ async function decideMessage(messageId: string, action: 'approve' | 'block') {
   if (!auth.token || !openThread.value) return
   feedback.value = ''
   try {
-    await api.adminDecide(auth.token, {
+    await api.adminDecide(auth.getToken, {
       target: { type: 'message', messageId },
       action,
     })
@@ -175,7 +180,7 @@ const history = ref<UserModerationHistory | null>(null)
 async function showHistory(userId: string) {
   if (!auth.token) return
   try {
-    history.value = await api.adminUserModeration(auth.token, userId)
+    history.value = await api.adminUserModeration(auth.getToken, userId)
   } catch {
     feedback.value = '載入違規紀錄失敗'
   }
@@ -188,7 +193,7 @@ async function reactivate(userId: string) {
   reactivating.value = true
   feedback.value = ''
   try {
-    await api.adminReactivate(auth.token, userId)
+    await api.adminReactivate(auth.getToken, userId)
     if (openThread.value) await reviewThread(openThread.value.id)
     if (history.value?.userId === userId) await showHistory(userId)
     await load()
@@ -205,7 +210,7 @@ async function suspend(userId: string, displayName: string) {
   reactivating.value = true
   feedback.value = ''
   try {
-    await api.adminSuspend(auth.token, userId)
+    await api.adminSuspend(auth.getToken, userId)
     if (history.value?.userId === userId) await showHistory(userId)
     await load()
   } catch (err) {
@@ -220,10 +225,15 @@ async function suspend(userId: string, displayName: string) {
 
 async function disbandTeam(team: AdminTeamItem) {
   if (!auth.token) return
-  if (!window.confirm(`確定強制解散「${team.name}」嗎？（${team.memberCount} 名成員將被移出，無法復原）`)) return
+  if (
+    !window.confirm(
+      `確定強制解散「${team.name}」嗎？（${team.memberCount} 名${eventStore.termMember}將被移出，無法復原）`,
+    )
+  )
+    return
   feedback.value = ''
   try {
-    await api.adminDeleteTeam(auth.token, team.id)
+    await api.adminDeleteTeam(auth.getToken, team.id)
     await load()
   } catch {
     feedback.value = '解散失敗，請稍後再試'
@@ -248,7 +258,7 @@ async function disbandTeam(team: AdminTeamItem) {
         <button
           v-for="t in TABS"
           :key="t.key"
-          class="btn !min-h-[40px] text-sm"
+          class="btn text-sm"
           :class="tab === t.key ? 'btn-primary' : 'btn-quiet'"
           role="tab"
           :aria-selected="tab === t.key"
@@ -256,7 +266,7 @@ async function disbandTeam(team: AdminTeamItem) {
         >
           {{ t.label }}
         </button>
-        <button class="btn btn-quiet !min-h-[40px] text-sm" :disabled="loading" @click="load">
+        <button class="btn btn-quiet text-sm" :disabled="loading" @click="load">
           重新整理
         </button>
       </div>
@@ -293,7 +303,7 @@ async function disbandTeam(team: AdminTeamItem) {
               <template v-for="(n, status, i) in stats.teams.byStatus" :key="status">
                 <span v-if="i > 0">・</span>{{ TEAM_STATUS_LABEL[status] ?? status }} {{ n }}
               </template>
-              ・已入隊 {{ stats.teams.membersInTeams }} 人
+              ・已加入{{ eventStore.termTeam }} {{ stats.teams.membersInTeams }} 人
             </p>
           </div>
           <div class="card p-5">
@@ -305,15 +315,15 @@ async function disbandTeam(team: AdminTeamItem) {
         <p v-else-if="!loading" class="mt-6 text-dim">尚無統計資料。</p>
       </template>
 
-      <!-- 成員名單（僅中繼資料：不含 Email 與任何內容） -->
+      <!-- 帳號名單（僅中繼資料：不含 Email 與任何內容） -->
       <template v-else-if="tab === 'users'">
         <div class="mt-4 flex flex-wrap items-center gap-3">
           <input
             v-model="userSearch"
             type="search"
-            class="field-input !min-h-[40px] w-full max-w-xs text-sm"
-            placeholder="搜尋暱稱或隊伍名"
-            aria-label="搜尋成員"
+            class="field-input w-full max-w-xs text-sm"
+            :placeholder="`搜尋暱稱或${eventStore.termTeam}名稱`"
+            aria-label="搜尋帳號"
           />
           <p class="text-xs text-dim">此名單只含暱稱與狀態，不含 Email 或任何內容。</p>
         </div>
@@ -371,10 +381,10 @@ async function disbandTeam(team: AdminTeamItem) {
             </button>
           </li>
         </ul>
-        <EmptyState v-else-if="!loading" class="mt-6" title="沒有符合的成員" hint="換個關鍵字試試。" />
+        <EmptyState v-else-if="!loading" class="mt-6" title="沒有符合的帳號" hint="換個關鍵字試試。" />
       </template>
 
-      <!-- 隊伍名單 -->
+      <!-- termTeam 名單 -->
       <template v-else-if="tab === 'teams'">
         <ul v-if="teams.length" class="mt-6 space-y-2">
           <li
@@ -388,7 +398,7 @@ async function disbandTeam(team: AdminTeamItem) {
             <span class="rounded-full bg-mist px-2.5 py-0.5 text-xs text-dim">
               {{ TEAM_STATUS_LABEL[t.status] ?? t.status }}
             </span>
-            <span class="text-sm text-dim">{{ t.memberCount }} 人</span>
+            <span class="text-sm text-dim">{{ t.memberCount }} 名{{ eventStore.termMember }}</span>
             <span class="text-sm text-dim">
               發起人：
               <button
@@ -428,15 +438,15 @@ async function disbandTeam(team: AdminTeamItem) {
             </div>
             <p class="mt-3 whitespace-pre-line rounded-lg bg-mist p-4 text-sm">{{ item.content }}</p>
             <div class="mt-4 flex gap-2">
-              <button class="btn btn-primary !min-h-[40px] text-sm" @click="decide(item, 'approve')">
+              <button class="btn btn-primary text-sm" @click="decide(item, 'approve')">
                 放行
               </button>
-              <button class="btn btn-danger !min-h-[40px] text-sm" @click="decide(item, 'block')">
+              <button class="btn btn-danger text-sm" @click="decide(item, 'block')">
                 擋下
               </button>
               <button
                 v-if="item.threadId"
-                class="btn btn-quiet !min-h-[40px] text-sm"
+                class="btn btn-quiet text-sm"
                 @click="reviewThread(item.threadId)"
               >
                 檢視對話
@@ -480,7 +490,7 @@ async function disbandTeam(team: AdminTeamItem) {
               <span class="ml-2 text-dim">{{ item.rationale || '（無理由）' }}</span>
             </p>
             <p class="mt-1 font-mono text-[11px] text-dim">{{ formatDateTime(item.decidedAt) }}</p>
-            <button class="btn btn-quiet mt-3 !min-h-[36px] text-sm" @click="reviewThread(item.threadId)">
+            <button class="btn btn-quiet mt-3 text-sm" @click="reviewThread(item.threadId)">
               檢視對話
             </button>
           </li>
@@ -489,73 +499,70 @@ async function disbandTeam(team: AdminTeamItem) {
       </template>
 
       <!-- 對話檢視 -->
-      <div
-        v-if="openThread || threadLoading"
-        class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-        role="dialog"
-        aria-modal="true"
-        aria-label="對話檢視"
-        @click.self="openThread = null"
+      <ModalShell
+        :open="!!openThread || threadLoading"
+        labelledby="admin-thread-title"
+        panel-class="max-h-[85vh] max-w-2xl overflow-y-auto"
+        @close="openThread = null"
       >
-        <div class="card max-h-[85vh] w-full max-w-2xl overflow-y-auto p-6">
-          <p v-if="threadLoading" class="text-dim">載入中⋯</p>
-          <template v-else-if="openThread">
-            <div class="flex items-start justify-between gap-3">
-              <div>
-                <h2 class="text-lg font-bold">對話檢視</h2>
-                <p class="mt-1 text-sm text-dim">
-                  <template v-for="(p, i) in openThread.participants" :key="p.userId">
-                    <button class="cursor-pointer underline decoration-dotted underline-offset-2" @click="showHistory(p.userId)">
-                      {{ p.displayName }}
-                    </button>
-                    <span v-if="p.status !== 'active'">（{{ p.status === 'suspended' ? '已停權' : '已刪除' }}）</span>
-                    <span v-if="i === 0"> ↔ </span>
-                  </template>
-                  ・此次閱覽已記入稽核
-                </p>
-              </div>
-              <button class="btn btn-quiet !min-h-[36px] text-sm" @click="openThread = null">關閉</button>
+        <p v-if="threadLoading" id="admin-thread-title" class="text-dim">載入中⋯</p>
+        <template v-else-if="openThread">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <h2 id="admin-thread-title" class="text-lg font-bold">對話檢視</h2>
+              <p class="mt-1 text-sm text-dim">
+                <template v-for="(p, i) in openThread.participants" :key="p.userId">
+                  <button class="cursor-pointer underline decoration-dotted underline-offset-2" @click="showHistory(p.userId)">
+                    {{ p.displayName }}
+                  </button>
+                  <span v-if="p.status !== 'active'">（{{ p.status === 'suspended' ? '已停權' : '已刪除' }}）</span>
+                  <span v-if="i === 0"> ↔ </span>
+                </template>
+                ・此次閱覽已記入稽核
+              </p>
             </div>
+            <button class="btn btn-quiet text-sm" data-autofocus @click="openThread = null">
+              關閉
+            </button>
+          </div>
 
-            <ul class="mt-4 space-y-3">
-              <li v-for="m in openThread.messages" :key="m.id" class="rounded-lg border border-line p-3">
-                <div class="flex flex-wrap items-center gap-2 text-xs">
-                  <span class="font-medium">{{ m.senderDisplayName }}</span>
-                  <span class="font-mono text-dim">{{ formatDateTime(m.createdAt) }}</span>
-                  <span v-if="m.riskLevel" class="rounded-full px-2 py-0.5" :class="RISK_CLASS[m.riskLevel]">
-                    {{ RISK_LABEL[m.riskLevel] }}
-                  </span>
-                  <span v-if="m.flagged" class="text-warn">待抽查</span>
-                  <span v-if="m.reportCount > 0" class="text-danger">被檢舉 ×{{ m.reportCount }}</span>
-                  <span v-if="m.visibility !== 'published'" class="text-dim">
-                    （{{ m.visibility === 'blocked' ? '已封鎖' : '審核中' }}）
-                  </span>
-                </div>
-                <p class="mt-2 whitespace-pre-line text-sm">{{ m.body }}</p>
-                <div v-if="m.flagged || m.visibility !== 'published' || m.reportCount > 0" class="mt-2 flex gap-2">
-                  <button class="btn btn-primary !min-h-[32px] text-xs" @click="decideMessage(m.id, 'approve')">
-                    放行
-                  </button>
-                  <button class="btn btn-danger !min-h-[32px] text-xs" @click="decideMessage(m.id, 'block')">
-                    擋下
-                  </button>
-                </div>
-              </li>
-            </ul>
-          </template>
-        </div>
-      </div>
+          <ul class="mt-4 space-y-3">
+            <li v-for="m in openThread.messages" :key="m.id" class="rounded-lg border border-line p-3">
+              <div class="flex flex-wrap items-center gap-2 text-xs">
+                <span class="font-medium">{{ m.senderDisplayName }}</span>
+                <span class="font-mono text-dim">{{ formatDateTime(m.createdAt) }}</span>
+                <span v-if="m.riskLevel" class="rounded-full px-2 py-0.5" :class="RISK_CLASS[m.riskLevel]">
+                  {{ RISK_LABEL[m.riskLevel] }}
+                </span>
+                <span v-if="m.flagged" class="text-warn">待抽查</span>
+                <span v-if="m.reportCount > 0" class="text-danger">被檢舉 ×{{ m.reportCount }}</span>
+                <span v-if="m.visibility !== 'published'" class="text-dim">
+                  （{{ m.visibility === 'blocked' ? '已封鎖' : '審核中' }}）
+                </span>
+              </div>
+              <p class="mt-2 whitespace-pre-line text-sm">{{ m.body }}</p>
+              <div v-if="m.flagged || m.visibility !== 'published' || m.reportCount > 0" class="mt-2 flex gap-2">
+                <button class="btn btn-primary !min-h-[32px] text-xs" @click="decideMessage(m.id, 'approve')">
+                  放行
+                </button>
+                <button class="btn btn-danger !min-h-[32px] text-xs" @click="decideMessage(m.id, 'block')">
+                  擋下
+                </button>
+              </div>
+            </li>
+          </ul>
+        </template>
+      </ModalShell>
 
       <!-- 使用者違規紀錄（可從風險列表或對話檢視開啟，浮在最上層） -->
-      <div
-        v-if="history"
-        class="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
-        role="dialog"
-        aria-modal="true"
-        aria-label="使用者審核紀錄"
-        @click.self="history = null"
+      <ModalShell
+        :open="!!history"
+        label="使用者審核紀錄"
+        panel-class="max-h-[75vh] max-w-lg overflow-y-auto"
+        :z-index="60"
+        @close="history = null"
       >
-        <div class="card max-h-[75vh] w-full max-w-lg overflow-y-auto p-6">
+        <template v-if="history">
           <div class="flex flex-wrap items-center justify-between gap-2">
             <p class="font-bold">
               {{ history.displayName }}
@@ -566,7 +573,7 @@ async function disbandTeam(team: AdminTeamItem) {
             <div class="flex gap-2">
               <button
                 v-if="history.status === 'suspended'"
-                class="btn btn-primary !min-h-[36px] text-sm"
+                class="btn btn-primary text-sm"
                 :disabled="reactivating"
                 @click="reactivate(history.userId)"
               >
@@ -574,13 +581,15 @@ async function disbandTeam(team: AdminTeamItem) {
               </button>
               <button
                 v-else-if="history.status === 'active'"
-                class="btn btn-danger !min-h-[36px] text-sm"
+                class="btn btn-danger text-sm"
                 :disabled="reactivating"
                 @click="suspend(history.userId, history.displayName)"
               >
                 停權
               </button>
-              <button class="btn btn-quiet !min-h-[36px] text-sm" @click="history = null">關閉</button>
+              <button class="btn btn-quiet text-sm" data-autofocus @click="history = null">
+                關閉
+              </button>
             </div>
           </div>
           <ul v-if="history.records.length" class="mt-4 space-y-2 text-sm">
@@ -595,8 +604,8 @@ async function disbandTeam(team: AdminTeamItem) {
             </li>
           </ul>
           <p v-else class="mt-4 text-sm text-dim">沒有任何審核紀錄。</p>
-        </div>
-      </div>
+        </template>
+      </ModalShell>
     </template>
   </div>
 </template>

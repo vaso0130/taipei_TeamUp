@@ -21,6 +21,11 @@ export const router = createRouter({
     { path: '/admin', name: 'admin', component: () => import('./pages/AdminPage.vue') },
     { path: '/privacy', name: 'privacy', component: () => import('./pages/PrivacyPage.vue') },
     { path: '/terms', name: 'terms', component: () => import('./pages/TermsPage.vue') },
+    {
+      path: '/:pathMatch(.*)*',
+      name: 'not-found',
+      component: () => import('./pages/NotFoundPage.vue'),
+    },
   ],
   scrollBehavior: () => ({ top: 0 }),
 })

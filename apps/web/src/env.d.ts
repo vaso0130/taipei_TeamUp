@@ -11,6 +11,10 @@ interface ImportMetaEnv {
   readonly VITE_FIREBASE_API_KEY?: string
   readonly VITE_FIREBASE_AUTH_DOMAIN?: string
   readonly VITE_FIREBASE_PROJECT_ID?: string
+  /** Sender of sign-in mails (shown in the "check spam" hint); empty → noreply@<authDomain>. */
+  readonly VITE_MAIL_SENDER?: string
+  /** Human-readable form of VITE_MAIL_SENDER; empty → punycode labels decoded automatically. */
+  readonly VITE_MAIL_SENDER_DISPLAY?: string
 }
 
 interface ImportMeta {
