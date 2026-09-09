@@ -32,8 +32,8 @@ const LINES = ['正在找神隊友嗎？', '你來對地方了。', '快來看�
     </p>
 
     <h1 id="hero-title" class="led-line hero-brand" :style="{ '--i': LINES.length }">
-      <span class="font-brand">臺北配</span>
-      <span class="hero-brand-sub">配 Taipei</span>
+      <span class="font-brand">台北配</span>
+      <span class="hero-brand-sub">配.taipei</span>
     </h1>
 
     <p class="hero-cta-row">
@@ -98,9 +98,9 @@ const LINES = ['正在找神隊友嗎？', '你來對地方了。', '快來看�
   align-items: baseline;
   gap: 0.25rem 1rem;
   font-size: clamp(3.25rem, 2rem + 5vw, 5.5rem);
-  font-weight: 700;
+  font-weight: 900;
   line-height: 1.05;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.02em;
 }
 .hero-brand-sub {
   font-family: var(--font-mono);

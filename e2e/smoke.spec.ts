@@ -120,7 +120,7 @@ test('keyboard focus is visible on interactive elements', async ({ page }) => {
 
 test('landing board leads to the event list', async ({ page }) => {
   await page.goto('/')
-  await expect(page.getByRole('heading', { level: 1 })).toContainText('臺北配')
+  await expect(page.getByRole('heading', { level: 1 })).toContainText('台北配')
   await page.getByRole('link', { name: /看看進行中的活動/ }).click()
   await expect(page).toHaveURL(/\/events$/)
   await expect(page.getByRole('heading', { level: 1 })).toContainText('進行中的活動')

@@ -30,7 +30,8 @@
   --font-sans: 'Noto Sans TC', 'PingFang TC', 'Microsoft JhengHei', sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
   /* Brand 配 roundel: system 楷體 where available, otherwise the body face. */
-  --font-brand: 'Kaiti TC', 'BiauKai', 'DFKai-SB', 'STKaiti', 'KaiTi', 'Noto Sans TC', serif;
+  /* Brand mark uses the same sans as body copy (owner's call, 2026-09-09): no kaiti. */
+  --font-brand: 'Noto Sans TC', 'Microsoft JhengHei', 'PingFang TC', 'Heiti TC', sans-serif;
 }
 
 :root {
