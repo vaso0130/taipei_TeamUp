@@ -4,7 +4,15 @@ import { FieldCipher } from '../src/crypto/envelope.js'
 import { KmsKek } from '../src/crypto/kek.js'
 import { loadEventSeeds } from '../src/events/seed-loader.js'
 import { RecaptchaEnterpriseVerifier } from '../src/security/captcha.js'
-import { authHeader, buildTestApp, jsonHeaders, openRecruitWindow } from './helpers.js'
+import { MAX_BODY_BYTES, rateLimitsFromEnv, DEFAULT_RATE_LIMITS } from '../src/app.js'
+import {
+  authHeader,
+  buildTestApp,
+  joinEvent,
+  jsonHeaders,
+  openRecruitWindow,
+  userIdOf,
+} from './helpers.js'
 
 // ---------------------------------------------------------------
 // Cloud KMS KEK adapter — verified against a fake KMS endpoint.
@@ -122,6 +130,7 @@ describe('captcha route gate', () => {
 
   it('passes with a valid token, and is skipped entirely when unconfigured', async () => {
     const strict = buildTestApp([seed], { captcha: acceptAll })
+    await joinEvent(strict, seed.event.slug, 'human@example.com')
     const ok = await createTeam(strict, {
       ...jsonHeaders('human@example.com'),
       'x-recaptcha-token': 'tok',
@@ -129,7 +138,85 @@ describe('captcha route gate', () => {
     expect(ok.status).toBe(201)
 
     const dev = buildTestApp([seed])
+    await joinEvent(dev, seed.event.slug, 'dev@example.com')
     expect((await createTeam(dev, jsonHeaders('dev@example.com'))).status).toBe(201)
+  })
+})
+
+// ---------------------------------------------------------------
+// Request hardening: body size, path ids, internal-route secret,
+// suspended viewers on public routes.
+// ---------------------------------------------------------------
+
+describe('request hardening', () => {
+  it('rejects oversized JSON bodies with 413', async () => {
+    const t = buildTestApp([seed])
+    const res = await t.app.request('/api/me', {
+      method: 'PATCH',
+      headers: jsonHeaders('big@example.com'),
+      body: JSON.stringify({ displayName: 'x'.repeat(MAX_BODY_BYTES + 1024) }),
+    })
+    expect(res.status).toBe(413)
+    expect(((await res.json()) as { error: string }).error).toBe('payload_too_large')
+  })
+
+  it('treats malformed path ids as not found (never a database error)', async () => {
+    const t = buildTestApp([seed])
+    const team = await t.app.request('/api/teams/not-a-uuid')
+    expect(team.status).toBe(404)
+    expect(((await team.json()) as { error: string }).error).toBe('team_not_found')
+    const thread = await t.app.request('/api/threads/123/messages', { headers: authHeader('a@example.com') })
+    expect(thread.status).toBe(404)
+    expect(((await thread.json()) as { error: string }).error).toBe('thread_not_found')
+    const application = await t.app.request("/api/applications/'--/respond", {
+      method: 'POST',
+      headers: jsonHeaders('a@example.com'),
+      body: JSON.stringify({ action: 'accept' }),
+    })
+    expect(application.status).toBe(404)
+  })
+
+  it('a suspended account is treated as anonymous on public routes and blocked on private ones', async () => {
+    const t = buildTestApp([seed], { adminEmails: ['admin@example.gov'] })
+    await joinEvent(t, seed.event.slug, 'owner@example.com')
+    const created = await t.app.request(`/api/events/${seed.event.slug}/teams`, {
+      method: 'POST',
+      headers: jsonHeaders('owner@example.com'),
+      body: JSON.stringify({ name: '被停權前的隊' }),
+    })
+    const team = (await created.json()) as { id: string; viewerIsOwner: boolean }
+    expect(team.viewerIsOwner).toBe(true)
+
+    await t.userRepo.updateStatus(await userIdOf(t, 'owner@example.com'), 'suspended')
+
+    // Public route: the token no longer identifies a viewer.
+    const detail = await t.app.request(`/api/teams/${team.id}`, {
+      headers: authHeader('owner@example.com'),
+    })
+    expect(detail.status).toBe(200)
+    expect(((await detail.json()) as { viewerIsOwner: boolean }).viewerIsOwner).toBe(false)
+    // Private route: refused.
+    expect((await t.app.request('/api/me', { headers: authHeader('owner@example.com') })).status).toBe(403)
+  })
+
+  it('internal routes compare the task secret in constant time and still refuse mismatches', async () => {
+    const t = buildTestApp([seed], { taskSecret: 'correct-secret' })
+    const call = (secret?: string) =>
+      t.app.request('/internal/cleanup', {
+        method: 'POST',
+        headers: secret ? { 'x-task-secret': secret } : {},
+      })
+    expect((await call()).status).toBe(401)
+    expect((await call('correct-secre')).status).toBe(401) // length differs
+    expect((await call('correct-secreT')).status).toBe(401) // same length
+    expect((await call('correct-secret')).status).toBe(200)
+  })
+
+  it('rate limits come from the environment with validated defaults', () => {
+    expect(rateLimitsFromEnv({})).toEqual(DEFAULT_RATE_LIMITS)
+    expect(rateLimitsFromEnv({ RATE_LIMIT_EXPORTS_PER_DAY: '7' }).exportsPerDay).toBe(7)
+    expect(() => rateLimitsFromEnv({ RATE_LIMIT_EXPORTS_PER_DAY: '0' })).toThrow()
+    expect(() => rateLimitsFromEnv({ RATE_LIMIT_APPLIES_PER_DAY: 'many' })).toThrow()
   })
 })
 

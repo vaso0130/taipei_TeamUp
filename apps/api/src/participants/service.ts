@@ -1,6 +1,6 @@
 import type { ParticipationInput, ParticipationView, PublicParticipantView } from '@teamup/shared'
 import type { EventRepository } from '../events/repository.js'
-import type { ModerationQueue } from '../moderation/service.js'
+import { safeEnqueue, type ModerationQueue } from '../moderation/service.js'
 import type { UserRepository } from '../users/repository.js'
 import type { ParticipantRepository, ParticipationRecord } from './repository.js'
 
@@ -148,7 +148,8 @@ export class ParticipationService {
       (saved.blurb !== '' || saved.customTags.length > 0)
     ) {
       // Moderation runs async (spec §5.2) — the queue worker publishes.
-      await this.moderationQueue.enqueue({
+      // A failed enqueue keeps the text pending; cleanup re-queues it.
+      await safeEnqueue(this.moderationQueue, {
         type: 'participant_blurb',
         eventSlug,
         userId,

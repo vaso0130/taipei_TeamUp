@@ -7,6 +7,7 @@ import {
   TEST_PEPPER,
   authHeader,
   buildTestApp,
+  joinEvent,
   jsonHeaders,
   openRecruitWindow,
 } from './helpers.js'
@@ -28,6 +29,7 @@ async function userIdOf(email: string): Promise<string> {
 }
 
 async function createTeam(ownerEmail: string, name = '訊息測試隊'): Promise<TeamDetail> {
+  await joinEvent(t, SLUG, ownerEmail)
   const res = await t.app.request(`/api/events/${SLUG}/teams`, {
     method: 'POST',
     headers: jsonHeaders(ownerEmail),
@@ -38,6 +40,7 @@ async function createTeam(ownerEmail: string, name = '訊息測試隊'): Promise
 }
 
 async function joinTeam(teamId: string, memberEmail: string, ownerEmail: string) {
+  await joinEvent(t, SLUG, memberEmail, 'looking_for_team')
   const applyRes = await t.app.request(`/api/teams/${teamId}/applications`, {
     method: 'POST',
     headers: jsonHeaders(memberEmail),
@@ -98,6 +101,7 @@ describe('messaging permissions', () => {
 
   it('an applicant and the team owner can message while the application is pending', async () => {
     const team = await createTeam('owner@example.com')
+    await joinEvent(t, SLUG, 'applicant@example.com', 'looking_for_team')
     const applyRes = await t.app.request(`/api/teams/${team.id}/applications`, {
       method: 'POST',
       headers: jsonHeaders('applicant@example.com'),
@@ -112,6 +116,7 @@ describe('messaging permissions', () => {
 
   it('after a rejection the relationship is gone: sending is blocked, history stays readable', async () => {
     const team = await createTeam('owner@example.com')
+    await joinEvent(t, SLUG, 'applicant@example.com', 'looking_for_team')
     const applyRes = await t.app.request(`/api/teams/${team.id}/applications`, {
       method: 'POST',
       headers: jsonHeaders('applicant@example.com'),
@@ -137,6 +142,37 @@ describe('messaging permissions', () => {
 
     const read = await t.app.request(`/api/threads/${thread.id}/messages`, {
       headers: authHeader('applicant@example.com'),
+    })
+    expect(read.status).toBe(200)
+  })
+
+  it('leaving the team ends the messaging relationship (an old accepted application is not a licence)', async () => {
+    const team = await createTeam('owner@example.com')
+    await joinTeam(team.id, 'member@example.com', 'owner@example.com')
+    const memberId = await userIdOf('member@example.com')
+    const ownerId = await userIdOf('owner@example.com')
+    const started = await startThread('owner@example.com', memberId, '歡迎')
+    expect(started.status).toBe(201)
+    const { thread } = (await started.json()) as { thread: ThreadView }
+
+    const leave = await t.app.request(`/api/teams/${team.id}/leave`, {
+      method: 'POST',
+      headers: authHeader('member@example.com'),
+    })
+    expect(leave.status).toBe(200)
+
+    // Neither a new thread nor a message into the old one.
+    expect((await startThread('owner@example.com', memberId, '回來啦')).status).toBe(403)
+    expect((await startThread('member@example.com', ownerId, '我走了')).status).toBe(403)
+    const send = await t.app.request(`/api/threads/${thread.id}/messages`, {
+      method: 'POST',
+      headers: jsonHeaders('owner@example.com'),
+      body: JSON.stringify({ body: '還在嗎' }),
+    })
+    expect(send.status).toBe(403)
+    // History stays readable.
+    const read = await t.app.request(`/api/threads/${thread.id}/messages`, {
+      headers: authHeader('member@example.com'),
     })
     expect(read.status).toBe(200)
   })

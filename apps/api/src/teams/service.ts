@@ -9,7 +9,8 @@ import type {
   UpdateTeamInput,
 } from '@teamup/shared'
 import type { EventRepository } from '../events/repository.js'
-import type { ModerationQueue } from '../moderation/service.js'
+import { safeEnqueue, type ModerationQueue } from '../moderation/service.js'
+import type { ParticipantRepository } from '../participants/repository.js'
 import type { UserRepository } from '../users/repository.js'
 import type { JoinOptions, TeamListFilter, TeamRecord, TeamRepository } from './repository.js'
 
@@ -27,6 +28,7 @@ export type TeamErrorCode =
   | 'team_not_empty'
   | 'contacts_not_allowed_yet'
   | 'invalid_contacts'
+  | 'participation_required'
 
 export class TeamError extends Error {
   constructor(
@@ -52,12 +54,34 @@ export class TeamService {
     private readonly teams: TeamRepository,
     private readonly users: UserRepository,
     private readonly moderationQueue: ModerationQueue,
+    private readonly participants: ParticipantRepository,
   ) {}
 
   private async requireEvent(eventSlug: string): Promise<EventConfig> {
     const detail = await this.events.getEventBySlug(eventSlug)
     if (!detail) throw new TeamError('event_not_found')
     return detail.event
+  }
+
+  /**
+   * Event eligibility (H-4): opening a team requires a participation
+   * record in the event and, when the event asks, an answered adult
+   * check — the only place the event's age rule can bite.
+   */
+  private async requireParticipant(event: EventConfig, userId: string): Promise<void> {
+    const participation = await this.participants.get(event.slug, userId)
+    if (!participation) throw new TeamError('participation_required')
+    if (event.requiresAdultCheck && participation.isAdult === null) {
+      throw new TeamError('participation_required')
+    }
+  }
+
+  /** Authorization check for owner-only writes, usable before any side effect. */
+  async requireOwner(teamId: string, byUserId: string): Promise<TeamRecord> {
+    const team = await this.teams.getById(teamId)
+    if (!team) throw new TeamError('team_not_found')
+    if (team.ownerUserId !== byUserId) throw new TeamError('forbidden')
+    return team
   }
 
   private async validateDictionaryKeys(
@@ -82,6 +106,7 @@ export class TeamService {
   async createTeam(eventSlug: string, ownerUserId: string, input: CreateTeamInput) {
     const event = await this.requireEvent(eventSlug)
     if (!recruitWindowOpen(event)) throw new TeamError('recruiting_closed')
+    await this.requireParticipant(event, ownerUserId)
     await this.validateDictionaryKeys(eventSlug, input.neededRoles, input.neededSkills)
 
     const pitch = input.pitch.trim()
@@ -104,7 +129,7 @@ export class TeamService {
       throw new TeamError('team_not_found')
     }
     if (record.pitchVisibility === 'pending_review') {
-      await this.moderationQueue.enqueue({ type: 'team_pitch', teamId: record.id })
+      await safeEnqueue(this.moderationQueue, { type: 'team_pitch', teamId: record.id })
     }
     return this.getTeamDetail(record.id, ownerUserId)
   }
@@ -140,9 +165,7 @@ export class TeamService {
   }
 
   async updateTeam(teamId: string, byUserId: string, input: UpdateTeamInput) {
-    const team = await this.teams.getById(teamId)
-    if (!team) throw new TeamError('team_not_found')
-    if (team.ownerUserId !== byUserId) throw new TeamError('forbidden')
+    const team = await this.requireOwner(teamId, byUserId)
     const event = await this.requireEvent(team.eventSlug)
     await this.validateDictionaryKeys(team.eventSlug, input.neededRoles, input.neededSkills)
 
@@ -166,7 +189,7 @@ export class TeamService {
     }
     await this.teams.update(teamId, patch)
     if (patch.pitchVisibility === 'pending_review') {
-      await this.moderationQueue.enqueue({ type: 'team_pitch', teamId })
+      await safeEnqueue(this.moderationQueue, { type: 'team_pitch', teamId })
     }
     return this.getTeamDetail(teamId, byUserId)
   }

@@ -6,7 +6,14 @@ import type {
   TeamDetail,
 } from '@teamup/shared'
 import { loadEventSeeds } from '../src/events/seed-loader.js'
-import { authHeader, buildTestApp, jsonHeaders, openRecruitWindow, TEST_PEPPER } from './helpers.js'
+import {
+  authHeader,
+  buildTestApp,
+  joinEvent,
+  jsonHeaders,
+  openRecruitWindow,
+  TEST_PEPPER,
+} from './helpers.js'
 import { emailLookupHmac } from '../src/crypto/email.js'
 
 const seeds = loadEventSeeds()
@@ -33,6 +40,7 @@ const putBlurb = (email: string, blurb: string) =>
   })
 
 const createTeam = async (email: string, name: string) => {
+  await joinEvent(t, SLUG, email)
   const res = await t.app.request(`/api/events/${SLUG}/teams`, {
     method: 'POST',
     headers: jsonHeaders(email),

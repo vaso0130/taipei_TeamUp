@@ -25,7 +25,7 @@ export class MemoryTeamRepository implements TeamRepository {
   private readonly contacts = new Map<string, ContactRecord[]>()
 
   async create(record: TeamRecord, opts: JoinOptions): Promise<JoinResult> {
-    this.teams.set(record.id, { ...record, memberCount: 0 })
+    this.teams.set(record.id, { ...record, memberCount: 0, updatedAt: record.createdAt })
     this.members.set(record.id, new Map())
     const joined = await this.addMember(record.id, record.ownerUserId, opts)
     if (!joined.ok) {
@@ -53,7 +53,7 @@ export class MemoryTeamRepository implements TeamRepository {
 
   update(teamId: string, patch: Partial<TeamRecord>): Promise<void> {
     const team = this.teams.get(teamId)
-    if (team) Object.assign(team, patch)
+    if (team) Object.assign(team, patch, { updatedAt: new Date().toISOString() })
     return Promise.resolve()
   }
 

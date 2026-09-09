@@ -12,13 +12,14 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "seed": "tsx src/seed/run.ts",
-    "eval:moderation": "tsx scripts/eval-moderation.ts"
+    "eval:moderation": "tsx scripts/eval-moderation.ts",
+    "rehash:email-lookups": "tsx scripts/rehash-email-lookups.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",
     "@teamup/shared": "workspace:*",
     "dotenv": "^17.4.2",
-    "drizzle-orm": "^0.44.0",
+    "drizzle-orm": "^0.45.2",
     "google-auth-library": "^11.0.2",
     "hono": "^4.6.0",
     "jose": "^6.2.10",

@@ -1,19 +1,18 @@
 import { serve } from '@hono/node-server'
-import { GoogleAuth } from 'google-auth-library'
 import { loadLocalEnv } from './env.js'
 
 loadLocalEnv()
 import { AdminService } from './admin/service.js'
-import { createApp, type AppDeps } from './app.js'
+import { createApp, rateLimitsFromEnv, type AppDeps } from './app.js'
 import { DbApplicationRepository } from './applications/db-repository.js'
 import { ApplicationService } from './applications/service.js'
 import { AuditLogger, DbAuditLogRepository } from './audit/log.js'
 import { DevTokenVerifier, FirebaseTokenVerifier, type TokenVerifier } from './auth/verifier.js'
 import { emailLookupHmac, normalizeEmail } from './crypto/email.js'
 import { FieldCipher } from './crypto/envelope.js'
-import { KmsKek, LocalKek, type KeyEncryptionService } from './crypto/kek.js'
+import { buildKekFromEnv, googleTokenProvider, requireEnv } from './crypto/kek-from-env.js'
 import { RecaptchaEnterpriseVerifier, type CaptchaVerifier } from './security/captcha.js'
-import { createDb } from './db/client.js'
+import { createDb, DEFAULT_POOL_MAX, type Db } from './db/client.js'
 import { DbEventRepository } from './events/db-repository.js'
 import { SeedEventRepository } from './events/seed-repository.js'
 import { DbMessageRepository, DbThreadRepository } from './messaging/db-repository.js'
@@ -39,27 +38,15 @@ import { DbUserRepository } from './users/db-repository.js'
 import { CleanupService, PrivacyService } from './users/privacy-service.js'
 import { UserService } from './users/service.js'
 
-function requireEnv(name: string): string {
-  const value = process.env[name]
-  if (!value) throw new Error(`${name} is required when DATABASE_URL is set`)
-  return value
-}
+const isProduction = process.env.NODE_ENV === 'production'
 
-function buildKek(): KeyEncryptionService {
-  const provider = process.env.KEK_PROVIDER ?? 'local'
-  if (provider === 'local') {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('KEK_PROVIDER=local must never run in production — use kms')
-    }
-    return new LocalKek(requireEnv('LOCAL_KEK_BASE64'))
-  }
-  if (provider === 'kms') {
-    return new KmsKek({
-      keyName: requireEnv('KMS_KEY_NAME'),
-      tokenProvider: googleTokenProvider(),
-    })
-  }
-  throw new Error(`unsupported KEK_PROVIDER "${provider}" (supported: local, kms)`)
+/** Positive-integer environment value with a default. */
+function intEnv(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '') return fallback
+  const value = Number(raw)
+  if (!Number.isInteger(value) || value < 1) throw new Error(`${name} must be a positive integer`)
+  return value
 }
 
 function buildCaptcha(): CaptchaVerifier | undefined {
@@ -72,15 +59,6 @@ function buildCaptcha(): CaptchaVerifier | undefined {
   })
 }
 
-const googleTokenProvider = (): (() => Promise<string>) => {
-  const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] })
-  return async () => {
-    const token = await auth.getAccessToken()
-    if (!token) throw new Error('failed to obtain a Google access token')
-    return token
-  }
-}
-
 function buildModerator(): {
   moderator: Moderator
   syncModerator?: Moderator
@@ -91,7 +69,7 @@ function buildModerator(): {
 } {
   const provider = process.env.MODERATION_PROVIDER ?? 'mock'
   if (provider === 'mock') {
-    if (process.env.NODE_ENV === 'production') {
+    if (isProduction) {
       // Publishing user content without review is never acceptable in
       // production (spec §5) — refuse to start rather than run open.
       throw new Error('MODERATION_PROVIDER=mock must never run in production')
@@ -175,6 +153,12 @@ function buildVerifier(): TokenVerifier {
 function buildQueue(getService: () => ModerationService): ModerationQueue {
   const mode = process.env.MODERATION_QUEUE ?? 'in-process'
   if (mode === 'in-process') {
+    if (isProduction) {
+      // In-process review dies with the request/instance and has no
+      // retry — production must use the durable queue (same gate as the
+      // mock moderator and the local KEK).
+      throw new Error('MODERATION_QUEUE=in-process must never run in production — use cloud-tasks')
+    }
     return new InProcessModerationQueue(getService)
   }
   if (mode === 'cloud-tasks') {
@@ -188,17 +172,17 @@ function buildQueue(getService: () => ModerationService): ModerationQueue {
   throw new Error(`unsupported MODERATION_QUEUE "${mode}" (supported: in-process, cloud-tasks)`)
 }
 
-function buildDeps(): AppDeps {
+function buildDeps(): { appDeps: AppDeps; db?: Db } {
   const databaseUrl = process.env.DATABASE_URL
   if (!databaseUrl) {
     console.log('event repository: seed files (read-only mode, no DATABASE_URL set)')
-    return { events: SeedEventRepository.fromDirectory() }
+    return { appDeps: { events: SeedEventRepository.fromDirectory() } }
   }
 
   console.log('event repository: PostgreSQL')
-  const db = createDb(databaseUrl)
+  const db = createDb(databaseUrl, { poolMax: intEnv('DB_POOL_MAX', DEFAULT_POOL_MAX) })
   const events = new DbEventRepository(db)
-  const cipher = new FieldCipher(buildKek())
+  const cipher = new FieldCipher(buildKekFromEnv())
   const userRepo = new DbUserRepository(db)
   const teamRepo = new DbTeamRepository(db)
   const applicationRepo = new DbApplicationRepository(db)
@@ -215,6 +199,9 @@ function buildDeps(): AppDeps {
     buildModerator()
 
   const pepper = requireEnv('EMAIL_HMAC_PEPPER')
+  // Pepper rotation (M-9): the previous pepper keeps old lookups
+  // resolvable; matches are re-hashed to the current pepper on login.
+  const previousPepper = process.env.EMAIL_HMAC_PEPPER_PREVIOUS
   const adminEmails = new Set(
     (process.env.ADMIN_EMAILS ?? '')
       .split(',')
@@ -260,9 +247,14 @@ function buildDeps(): AppDeps {
   )
   const queue = buildQueue(() => moderation)
 
-  const users = new UserService(userRepo, cipher, pepper)
+  const users = new UserService(
+    userRepo,
+    cipher,
+    pepper,
+    previousPepper ? { previousPepper } : {},
+  )
   const participation = new ParticipationService(events, participantRepo, userRepo, queue)
-  const teams = new TeamService(events, teamRepo, userRepo, queue)
+  const teams = new TeamService(events, teamRepo, userRepo, queue, participantRepo)
   const applications = new ApplicationService(
     events,
     teamRepo,
@@ -270,6 +262,7 @@ function buildDeps(): AppDeps {
     applicationRepo,
     cipher,
     queue,
+    participantRepo,
   )
   const messaging = new MessagingService(
     events,
@@ -312,15 +305,25 @@ function buildDeps(): AppDeps {
     messages: messageRepo,
     cipher,
     audit,
+    records: recordsRepo,
+    reports: reportRepo,
+    contentReports: contentReportRepo,
   })
-  const cleanup = new CleanupService({
-    events,
-    users: userRepo,
-    participants: participantRepo,
-    teams: teamRepo,
-    threads: threadRepo,
-    auditRepo,
-  })
+  const cleanup = new CleanupService(
+    {
+      events,
+      users: userRepo,
+      participants: participantRepo,
+      teams: teamRepo,
+      threads: threadRepo,
+      auditRepo,
+      records: recordsRepo,
+      applications: applicationRepo,
+      messages: messageRepo,
+      moderationQueue: queue,
+    },
+    { requeueAfterMinutes: intEnv('MODERATION_REQUEUE_AFTER_MINUTES', 15) },
+  )
 
   const appDeps: AppDeps = {
     events,
@@ -338,6 +341,7 @@ function buildDeps(): AppDeps {
       cleanup,
     },
     adminEmails,
+    rateLimits: rateLimitsFromEnv(),
   }
   if (process.env.INTERNAL_TASK_SECRET) appDeps.taskSecret = process.env.INTERNAL_TASK_SECRET
   const captcha = buildCaptcha()
@@ -348,15 +352,40 @@ function buildDeps(): AppDeps {
     .map((o) => o.trim())
     .filter((o) => o.length > 0)
   if (origins.length > 0) appDeps.allowedOrigins = origins
-  return appDeps
+  return { appDeps, db }
 }
 
 function main() {
-  const app = createApp(buildDeps())
+  const { appDeps, db } = buildDeps()
+  const app = createApp(appDeps)
   const port = Number(process.env.PORT ?? 8080)
-  serve({ fetch: app.fetch, port }, (info) => {
+  const server = serve({ fetch: app.fetch, port }, (info) => {
     console.log(`api listening on :${info.port}`)
   })
+
+  // Graceful shutdown (Cloud Run sends SIGTERM, then kills after 10s):
+  // stop accepting, let in-flight requests finish, drain the pool.
+  let shuttingDown = false
+  const shutdown = (signal: string) => {
+    if (shuttingDown) return
+    shuttingDown = true
+    console.log(`${signal} received, shutting down`)
+    const forceExit = setTimeout(() => {
+      console.error('shutdown timed out, exiting')
+      process.exit(1)
+    }, 8000)
+    forceExit.unref()
+    server.close(() => {
+      const drained = db ? db.$client.end() : Promise.resolve()
+      drained
+        .catch((err: unknown) => {
+          console.error('pool drain failed', err instanceof Error ? err.message : err)
+        })
+        .finally(() => process.exit(0))
+    })
+  }
+  process.on('SIGTERM', () => shutdown('SIGTERM'))
+  process.on('SIGINT', () => shutdown('SIGINT'))
 }
 
 main()

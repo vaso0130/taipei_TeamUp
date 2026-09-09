@@ -12,6 +12,8 @@ export interface TeamRecord {
   ownerUserId: string
   memberCount: number
   createdAt: string
+  /** Last write (pitch edits included) — drives the stale-review re-queue. */
+  updatedAt?: string
 }
 
 export interface MemberRecord {

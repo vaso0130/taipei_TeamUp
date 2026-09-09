@@ -81,7 +81,7 @@ export class DbApplicationRepository implements ApplicationRepository {
       .where(
         and(
           eq(events.slug, eventSlug),
-          inArray(applications.status, ['pending', 'accepted']),
+          eq(applications.status, 'pending'),
           or(
             and(eq(applications.applicantId, userA), eq(teams.ownerUserId, userB)),
             and(eq(applications.applicantId, userB), eq(teams.ownerUserId, userA)),
@@ -115,11 +115,17 @@ export class DbApplicationRepository implements ApplicationRepository {
     return rows.map(toRecord)
   }
 
-  async updateStatus(id: string, status: ApplicationStatus): Promise<void> {
-    await this.db
+  async updateStatus(
+    id: string,
+    status: ApplicationStatus,
+    from: ApplicationStatus = 'pending',
+  ): Promise<boolean> {
+    const updated = await this.db
       .update(applications)
       .set({ status, decidedAt: new Date() })
-      .where(eq(applications.id, id))
+      .where(and(eq(applications.id, id), eq(applications.status, from)))
+      .returning({ id: applications.id })
+    return updated.length > 0
   }
 
   async withdrawPendingForUser(

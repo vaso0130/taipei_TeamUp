@@ -47,10 +47,59 @@ export interface ModerationQueue {
   enqueue(target: ModerationTarget): Promise<void>
 }
 
+/**
+ * Enqueue without letting a queue outage surface as a user-facing 500:
+ * the content was already stored as pending_review (never published), so
+ * the only consequence of a failed enqueue is a delayed review — which
+ * the cleanup job repairs by re-queueing stale pending content. Returns
+ * whether the enqueue succeeded.
+ */
+export async function safeEnqueue(queue: ModerationQueue, target: ModerationTarget): Promise<boolean> {
+  try {
+    await queue.enqueue(target)
+    return true
+  } catch (err) {
+    console.error(
+      `moderation enqueue failed (${target.type}/${targetId(target)}): ` +
+        (err instanceof Error ? `${err.name}: ${err.message}` : 'unknown error'),
+    )
+    return false
+  }
+}
+
+/**
+ * Target types that share one piece of content (the reported variant
+ * re-reviews the same text under a different type, and a human decision
+ * may be recorded under either). Used wherever "the latest verdict for
+ * this content" matters.
+ */
+export const targetFamily = (target: ModerationTarget): string[] => {
+  switch (target.type) {
+    case 'message':
+    case 'reported_message':
+      return ['message', 'reported_message']
+    case 'team_pitch':
+    case 'reported_team_pitch':
+      return ['team_pitch', 'reported_team_pitch']
+    case 'participant_blurb':
+    case 'reported_blurb':
+      return ['participant_blurb', 'reported_blurb']
+    case 'application_message':
+      return ['application_message']
+  }
+}
+
+/** Recorded as model_id when no model produced the verdict (fail-closed). */
+export const FAIL_CLOSED_MODEL_ID = 'unavailable'
+
+const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex')
+
 interface ResolvedContent {
   text: string
   context: ModerationContext
   subjectUserId: string | null
+  /** Current stored visibility (what an idempotent no-op returns). */
+  visibility: ContentVisibility
   apply(visibility: ContentVisibility): Promise<void>
 }
 
@@ -157,6 +206,19 @@ export class ModerationService {
     const resolved = await this.resolve(target)
     if (!resolved) return 'pending_review'
 
+    // Idempotency (Cloud Tasks is at-least-once): a redelivered task must
+    // neither undo a human decision nor stack a second identical verdict
+    // (which would double-count strikes).
+    const latest = await this.deps.records.latestFor(targetFamily(target), targetId(target))
+    if (latest) {
+      if (latest.decidedBy.startsWith('human:')) return resolved.visibility
+      const sameContent =
+        latest.targetType === target.type &&
+        latest.contentSha256 === sha256(resolved.text) &&
+        latest.modelId !== FAIL_CLOSED_MODEL_ID
+      if (sameContent) return resolved.visibility
+    }
+
     // Reported content gets the stronger escalation model when wired.
     const moderator = isReported(target)
       ? (this.deps.escalationModerator ?? this.deps.moderator)
@@ -181,12 +243,14 @@ export class ModerationService {
           `failing closed to pending review (${target.type}/${targetId(target)})`,
       )
     }
-    verdict ??= {
-      riskLevel: 'medium',
-      categories: ['none'],
-      rationale: '審核服務暫時無法使用',
-    }
-    return this.applyVerdict(target, resolved, verdict, 'auto')
+    if (verdict) return this.applyVerdict(target, resolved, verdict, 'auto')
+    return this.applyVerdict(
+      target,
+      resolved,
+      { riskLevel: 'medium', categories: ['none'], rationale: '審核服務暫時無法使用' },
+      'auto',
+      FAIL_CLOSED_MODEL_ID,
+    )
   }
 
   /**
@@ -219,7 +283,7 @@ export class ModerationService {
       id: uuidv7(),
       targetType,
       targetId,
-      contentSha256: createHash('sha256').update(text, 'utf8').digest('hex'),
+      contentSha256: sha256(text),
       riskLevel: verdict.riskLevel,
       categories: verdict.categories,
       rationale: verdict.rationale ?? '',
@@ -260,6 +324,7 @@ export class ModerationService {
     resolved: ResolvedContent,
     verdict: ModerationVerdict,
     decidedBy: string,
+    modelIdOverride?: string,
   ): Promise<ContentVisibility> {
     const escalated = isReported(target) && decidedBy === 'auto'
     // Spot-check rule: published, but a human should glance at it later.
@@ -272,16 +337,17 @@ export class ModerationService {
       id: uuidv7(),
       targetType: target.type,
       targetId: targetId(target),
-      contentSha256: createHash('sha256').update(resolved.text, 'utf8').digest('hex'),
+      contentSha256: sha256(resolved.text),
       riskLevel: verdict.riskLevel,
       categories: verdict.categories,
       rationale: verdict.rationale ?? '',
       modelId:
-        decidedBy === 'auto'
+        modelIdOverride ??
+        (decidedBy === 'auto'
           ? escalated
             ? this.opts.escalationModelId
             : this.opts.modelId
-          : 'human',
+          : 'human'),
       promptVersion: escalated ? this.opts.escalationPromptVersion : this.opts.promptVersion,
       decidedBy,
       subjectUserId: resolved.subjectUserId,
@@ -402,6 +468,7 @@ export class ModerationService {
           text,
           context: { contentType: 'bio', relationship: 'strangers' },
           subjectUserId: record.userId,
+          visibility: record.blurbVisibility,
           apply: (v) =>
             this.deps.participants.updateBlurbVisibility(target.eventSlug, target.userId, v),
         }
@@ -413,6 +480,7 @@ export class ModerationService {
           text: team.pitch,
           context: { contentType: 'pitch', relationship: 'strangers' },
           subjectUserId: team.ownerUserId,
+          visibility: team.pitchVisibility,
           apply: (v) => this.deps.teams.update(team.id, { pitchVisibility: v }),
         }
       }
@@ -426,6 +494,7 @@ export class ModerationService {
           text: [`名稱：${team.name}`, team.pitch].filter((s) => s !== '').join('\n'),
           context: { contentType: 'pitch', relationship: 'strangers', ...reportReasons },
           subjectUserId: team.ownerUserId,
+          visibility: team.pitchVisibility,
           apply: (v) => this.deps.teams.update(team.id, { pitchVisibility: v }),
         }
       }
@@ -447,6 +516,7 @@ export class ModerationService {
             .join('\n'),
           context: { contentType: 'bio', relationship: 'strangers', ...reportReasons },
           subjectUserId: record.userId,
+          visibility: record.blurbVisibility,
           apply: (v) =>
             this.deps.participants.updateBlurbVisibility(target.eventSlug, target.userId, v),
         }
@@ -463,7 +533,21 @@ export class ModerationService {
           text: await this.deps.cipher.decrypt(application.messageCiphertext),
           context: { contentType: 'application_message', relationship: 'applicant_owner' },
           subjectUserId: senderId,
-          apply: (v) => this.deps.applications.updateMessageVisibility(application.id, v),
+          visibility: application.messageVisibility,
+          apply: async (v) => {
+            await this.deps.applications.updateMessageVisibility(application.id, v)
+            // Spec §5.5: a high-risk note voids the request itself — it
+            // can no longer be accepted, and the pending-only messaging
+            // relationship ends with it. A later human approve reopens
+            // it (best effort: a fresh pending row may exist by then).
+            if (v === 'blocked') {
+              await this.deps.applications.updateStatus(application.id, 'blocked')
+            } else if (v === 'published') {
+              await this.deps.applications
+                .updateStatus(application.id, 'pending', 'blocked')
+                .catch(() => false)
+            }
+          },
         }
       }
       case 'message':
@@ -500,6 +584,7 @@ export class ModerationService {
             ...(reportReasons.length > 0 ? { reportReasons } : {}),
           },
           subjectUserId: message.senderId,
+          visibility: message.visibility,
           apply: (v) => this.deps.messages.updateVisibility(message.id, v),
         }
       }

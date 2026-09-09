@@ -66,17 +66,20 @@ const CONTENT_TYPE_LABEL: Record<string, string> = {
 /**
  * Shared user-prompt builder for every model adapter. Delimiter
  * escaping (spec §5.4): the wrapper tags may never occur inside the
- * reviewed content. Privacy (spec §5.6): the payload contains ONLY the
- * content text, rule signals, relationship kind and enum report
- * reasons — no user ids, no emails.
+ * reviewed content. Rule signals are passed as KINDS only — the matched
+ * substrings are user text and would otherwise re-enter the prompt
+ * outside the data delimiter (an injection surface); the model already
+ * sees the full text inside the delimiter. Privacy (spec §5.6): the
+ * payload contains ONLY the content text, signal kinds, relationship
+ * kind and enum report reasons — no user ids, no emails.
  */
 export function buildReviewPrompt(text: string, context?: ModerationContext): string {
   const sanitized = text.replaceAll(/<\/?content_to_review>/giu, '')
-  const signals = extractSignals(sanitized)
+  const signalKinds = [...new Set(extractSignals(sanitized).map((s) => s.kind))]
   return [
     `內容類型：${CONTENT_TYPE_LABEL[context?.contentType ?? 'message']}`,
     `雙方關係：${RELATIONSHIP_LABEL[context?.relationship ?? 'strangers']}`,
-    `規則特徵：${signals.length === 0 ? '（無）' : signals.map((s) => `${s.kind}=${s.match}`).join('; ')}`,
+    `規則特徵：${signalKinds.length === 0 ? '（無）' : signalKinds.join('; ')}`,
     ...(context?.reportReasons?.length
       ? [`使用者檢舉原因：${context.reportReasons.join('、')}`]
       : []),

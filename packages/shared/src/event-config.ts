@@ -9,6 +9,24 @@ import { z } from 'zod'
 export const EVENT_STATUSES = ['draft', 'open', 'closed', 'archived'] as const
 export type EventStatus = (typeof EVENT_STATUSES)[number]
 
+/**
+ * Schema ceilings shared by event config and request schemas. These are
+ * NOT event rules — they are the largest values the wire format can
+ * express. Every per-event value (requiredContacts, maxCustomTags, …)
+ * is constrained to fit inside them, so an event can never be configured
+ * beyond what the request schemas accept.
+ */
+export const SCHEMA_LIMITS = {
+  /** Upper bound for events.requiredContacts and contact ranks. */
+  maxContacts: 100,
+  /** Upper bound for the size of a role/skill dictionary and for key lists. */
+  maxDictionaryOptions: 100,
+  /** Upper bound for events.maxCustomTags and the tag list. */
+  maxCustomTags: 20,
+  /** Upper bound for events.customTagMaxLength and each tag. */
+  maxCustomTagLength: 30,
+} as const
+
 /** Machine keys: lowercase snake_case, e.g. `frontend`, `civic_knowledge`. */
 const optionKey = z
   .string()
@@ -44,7 +62,7 @@ export const EventConfigSchema = z
     /** true → a user may belong to at most one team in this event. */
     exclusiveMembership: z.boolean(),
     /** How many contact persons a team must designate (0 = none). */
-    requiredContacts: z.number().int().min(0),
+    requiredContacts: z.number().int().min(0).max(SCHEMA_LIMITS.maxContacts),
     /** true → ask participants whether they are 18+ on join. */
     requiresAdultCheck: z.boolean(),
     /** UI terminology overrides, e.g. 讀書會 instead of 隊伍. */
@@ -58,8 +76,13 @@ export const EventConfigSchema = z
      * dictionary missed). 0 = not allowed. Tags are moderated together
      * with the blurb before becoming public.
      */
-    maxCustomTags: z.number().int().min(0).max(20).default(0),
-    customTagMaxLength: z.number().int().min(1).max(30).default(16),
+    maxCustomTags: z.number().int().min(0).max(SCHEMA_LIMITS.maxCustomTags).default(0),
+    customTagMaxLength: z
+      .number()
+      .int()
+      .min(1)
+      .max(SCHEMA_LIMITS.maxCustomTagLength)
+      .default(16),
   })
   .refine((e) => e.maxMembers >= e.minMembers, {
     message: 'maxMembers must be >= minMembers',
@@ -93,8 +116,8 @@ const uniqueKeys = (options: { key: string }[], ctx: z.RefinementCtx, path: stri
 export const EventSeedSchema = z
   .object({
     event: EventConfigSchema,
-    roles: z.array(DictionaryOptionSchema),
-    skills: z.array(DictionaryOptionSchema),
+    roles: z.array(DictionaryOptionSchema).max(SCHEMA_LIMITS.maxDictionaryOptions),
+    skills: z.array(DictionaryOptionSchema).max(SCHEMA_LIMITS.maxDictionaryOptions),
   })
   .superRefine((seed, ctx) => {
     uniqueKeys(seed.roles, ctx, 'roles')

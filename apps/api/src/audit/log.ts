@@ -70,26 +70,43 @@ export class DbAuditLogRepository implements AuditLogRepository {
   }
 }
 
-/** Convenience writer — audit failures must never break the user action. */
+export interface AuditFields {
+  actorUserId?: string | null
+  targetType?: string
+  targetId?: string
+  detail?: string
+}
+
+/**
+ * Convenience writer with two failure modes:
+ * - `log`: fail-open — a broken audit store must never break a person's
+ *   own action (export, deletion, report).
+ * - `logOrThrow`: fail-closed — an administrator's decrypting read is
+ *   refused unless the trail is written first (擋比較嚴).
+ */
 export class AuditLogger {
   constructor(private readonly repo: AuditLogRepository) {}
 
-  async log(
-    action: AuditAction,
-    fields: { actorUserId?: string | null; targetType?: string; targetId?: string; detail?: string },
-  ): Promise<void> {
+  async log(action: AuditAction, fields: AuditFields): Promise<void> {
     try {
-      await this.repo.create({
-        id: uuidv7(),
-        actorUserId: fields.actorUserId ?? null,
-        action,
-        targetType: fields.targetType ?? '',
-        targetId: fields.targetId ?? '',
-        detail: fields.detail ?? '',
-        createdAt: new Date().toISOString(),
-      })
+      await this.logOrThrow(action, fields)
     } catch (err) {
-      console.error('audit log write failed', err)
+      console.error(
+        'audit log write failed',
+        err instanceof Error ? `${err.name}: ${err.message}` : 'unknown error',
+      )
     }
+  }
+
+  async logOrThrow(action: AuditAction, fields: AuditFields): Promise<void> {
+    await this.repo.create({
+      id: uuidv7(),
+      actorUserId: fields.actorUserId ?? null,
+      action,
+      targetType: fields.targetType ?? '',
+      targetId: fields.targetId ?? '',
+      detail: fields.detail ?? '',
+      createdAt: new Date().toISOString(),
+    })
   }
 }

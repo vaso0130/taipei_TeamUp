@@ -17,6 +17,7 @@ const toRecord = (eventSlug: string, row: ParticipantRow): ParticipationRecord =
   blurbVisibility: row.blurbVisibility,
   isAdult: row.isAdult,
   guardianConsentConfirmed: row.guardianConsentConfirmed,
+  updatedAt: row.updatedAt.toISOString(),
 })
 
 export class DbParticipantRepository implements ParticipantRepository {

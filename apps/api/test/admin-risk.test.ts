@@ -12,6 +12,7 @@ import { loadEventSeeds } from '../src/events/seed-loader.js'
 import {
   authHeader,
   buildTestApp,
+  joinEvent,
   jsonHeaders,
   openRecruitWindow,
 } from './helpers.js'
@@ -30,6 +31,8 @@ let reportedMessage: MessageView
 /** owner↔applicant thread with three published messages of distinct risk shapes. */
 async function setup() {
   t = buildTestApp([seed], { adminEmails: [ADMIN] })
+  await joinEvent(t, SLUG, 'owner@example.com')
+  await joinEvent(t, SLUG, 'applicant@example.com', 'looking_for_team')
   const teamRes = await t.app.request(`/api/events/${SLUG}/teams`, {
     method: 'POST',
     headers: jsonHeaders('owner@example.com'),
@@ -122,6 +125,83 @@ describe('admin risk overview', () => {
       (e) => e.action === 'admin_review_read' && e.targetType === 'thread',
     )
     expect(audited?.targetId).toBe(threadId)
+  })
+
+  it('refuses to open a thread with no risk-relevant message (ordinary conversations stay private)', async () => {
+    // A second pair whose only message is clean, unflagged and unreported.
+    await joinEvent(t, SLUG, 'quiet@example.com')
+    await joinEvent(t, SLUG, 'friend@example.com', 'looking_for_team')
+    const teamRes = await t.app.request(`/api/events/${SLUG}/teams`, {
+      method: 'POST',
+      headers: jsonHeaders('quiet@example.com'),
+      body: JSON.stringify({ name: '安靜隊' }),
+    })
+    const team = (await teamRes.json()) as TeamDetail
+    const applyRes = await t.app.request(`/api/teams/${team.id}/applications`, {
+      method: 'POST',
+      headers: jsonHeaders('friend@example.com'),
+      body: JSON.stringify({ message: '' }),
+    })
+    const application = (await applyRes.json()) as ApplicationView
+    const sent = await t.app.request(`/api/events/${SLUG}/threads`, {
+      method: 'POST',
+      headers: jsonHeaders('quiet@example.com'),
+      body: JSON.stringify({ toUserId: application.applicantId, body: '你好，聊聊題目' }),
+    })
+    const { thread } = (await sent.json()) as { thread: ThreadView }
+
+    const auditBefore = t.auditRepo.entries.length
+    const res = await t.app.request(`/api/admin/threads/${thread.id}`, {
+      headers: authHeader(ADMIN),
+    })
+    expect(res.status).toBe(403)
+    expect(((await res.json()) as { error: string }).error).toBe('forbidden')
+    // No decrypting read happened, so no read is audited either.
+    expect(
+      t.auditRepo.entries.slice(auditBefore).some((e) => e.targetType === 'thread'),
+    ).toBe(false)
+
+    // Unknown / malformed ids are 404, not 500.
+    expect(
+      (await t.app.request('/api/admin/threads/not-a-uuid', { headers: authHeader(ADMIN) })).status,
+    ).toBe(404)
+  })
+
+  it('admin decrypting reads fail closed when the audit trail cannot be written', async () => {
+    const original = t.auditRepo.create.bind(t.auditRepo)
+    t.auditRepo.create = () => Promise.reject(new Error('audit store down'))
+    try {
+      const thread = await t.app.request(`/api/admin/threads/${threadId}`, {
+        headers: authHeader(ADMIN),
+      })
+      expect(thread.status).toBe(500)
+      expect(await thread.text()).not.toContain('LINE ID')
+      const queue = await t.app.request('/api/admin/moderation/pending', {
+        headers: authHeader(ADMIN),
+      })
+      expect(queue.status).toBe(500)
+    } finally {
+      t.auditRepo.create = original
+    }
+  })
+
+  it('the pending queue audits every item the admin is shown', async () => {
+    const medium = { review: () => Promise.resolve({ riskLevel: 'medium' as const, categories: [] }) }
+    const world = buildTestApp([seed], { moderator: medium, adminEmails: [ADMIN] })
+    for (const email of ['a@example.com', 'b@example.com']) {
+      await world.app.request(`/api/events/${SLUG}/participation`, {
+        method: 'PUT',
+        headers: jsonHeaders(email),
+        body: JSON.stringify({ intent: 'browsing', preferredRoles: [], skills: [], blurb: '待審', isAdult: true }),
+      })
+    }
+    const res = await world.app.request('/api/admin/moderation/pending', { headers: authHeader(ADMIN) })
+    expect(res.status).toBe(200)
+    const reads = world.auditRepo.entries.filter(
+      (e) => e.action === 'admin_review_read' && e.targetType === 'participant_blurb',
+    )
+    expect(reads).toHaveLength(2)
+    expect(new Set(reads.map((e) => e.targetId)).size).toBe(2)
   })
 
   it('shows a user moderation history', async () => {

@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
-import type { EventSeed } from '@teamup/shared'
+import type { EventSeed, ParticipantIntent } from '@teamup/shared'
 import { AdminService } from '../src/admin/service.js'
-import { createApp } from '../src/app.js'
+import { createApp, type RateLimitConfig } from '../src/app.js'
 import { MemoryApplicationRepository } from '../src/applications/memory-repository.js'
 import { ApplicationService } from '../src/applications/service.js'
 import { AuditLogger, MemoryAuditLogRepository } from '../src/audit/log.js'
@@ -17,7 +17,11 @@ import {
 import { MessagingService } from '../src/messaging/service.js'
 import { MockModerator, type Moderator } from '../src/moderation/moderator.js'
 import { MemoryModerationRecordRepository } from '../src/moderation/records.js'
-import { InProcessModerationQueue, ModerationService } from '../src/moderation/service.js'
+import {
+  InProcessModerationQueue,
+  ModerationService,
+  type ModerationQueue,
+} from '../src/moderation/service.js'
 import { MemoryParticipantRepository } from '../src/participants/memory-repository.js'
 import { MemoryReportRepository } from '../src/reports/repository.js'
 import { MemoryContentReportRepository } from '../src/reports/content-repository.js'
@@ -26,7 +30,11 @@ import { ParticipationService } from '../src/participants/service.js'
 import { MemoryTeamRepository } from '../src/teams/memory-repository.js'
 import { TeamService } from '../src/teams/service.js'
 import { MemoryUserRepository } from '../src/users/memory-repository.js'
-import { CleanupService, PrivacyService } from '../src/users/privacy-service.js'
+import {
+  CleanupService,
+  PrivacyService,
+  type CleanupOptions,
+} from '../src/users/privacy-service.js'
 import { UserService } from '../src/users/service.js'
 
 export const TEST_PEPPER = 'test-pepper-that-is-long-enough-0123456789'
@@ -43,6 +51,13 @@ export function buildTestApp(
     adminEmails?: string[]
     taskSecret?: string
     captcha?: import('../src/security/captcha.js').CaptchaVerifier
+    /** Override platform abuse limits (small numbers keep limiter tests short). */
+    rateLimits?: Partial<RateLimitConfig>
+    /** Wrap the in-process queue (e.g. to simulate enqueue outages). */
+    queue?: (inner: ModerationQueue) => ModerationQueue
+    cleanup?: CleanupOptions
+    /** Second UserService pepper (pepper rotation tests). */
+    previousPepper?: string
   } = {},
 ) {
   const eventsRepo = new SeedEventRepository(seeds)
@@ -89,15 +104,33 @@ export function buildTestApp(
     },
     { backoffMs: 0, modelId: 'test' },
   )
-  const queue = new InProcessModerationQueue(() => moderation)
+  const inProcessQueue = new InProcessModerationQueue(() => moderation)
+  const queue = opts.queue ? opts.queue(inProcessQueue) : inProcessQueue
+
+  const rateLimits: RateLimitConfig = {
+    teamCreatesPerDay: 3,
+    messagesPerHour: 30,
+    reportsPerHour: 10,
+    nameChangesPerHour: 10,
+    participationWritesPerHour: 20,
+    invitationsPerDay: 20,
+    appliesPerDay: 20,
+    exportsPerDay: 3,
+    ...opts.rateLimits,
+  }
 
   const app = createApp({
     events: eventsRepo,
     authed: {
       verifier: new DevTokenVerifier('test'),
-      users: new UserService(userRepo, cipher, TEST_PEPPER),
+      users: new UserService(
+        userRepo,
+        cipher,
+        TEST_PEPPER,
+        opts.previousPepper ? { previousPepper: opts.previousPepper } : {},
+      ),
       participation: new ParticipationService(eventsRepo, participantRepo, userRepo, queue),
-      teams: new TeamService(eventsRepo, teamRepo, userRepo, queue),
+      teams: new TeamService(eventsRepo, teamRepo, userRepo, queue, participantRepo),
       applications: new ApplicationService(
         eventsRepo,
         teamRepo,
@@ -105,6 +138,7 @@ export function buildTestApp(
         applicationRepo,
         cipher,
         queue,
+        participantRepo,
       ),
       messaging: new MessagingService(
         eventsRepo,
@@ -148,16 +182,29 @@ export function buildTestApp(
         messages: messageRepo,
         cipher,
         audit,
+        records: moderationRecords,
+        reports: reportRepo,
+        contentReports: contentReportRepo,
       }),
-      cleanup: new CleanupService({
-        events: eventsRepo,
-        users: userRepo,
-        participants: participantRepo,
-        teams: teamRepo,
-        threads: threadRepo,
-        auditRepo,
-      }),
+      cleanup: new CleanupService(
+        {
+          events: eventsRepo,
+          users: userRepo,
+          participants: participantRepo,
+          teams: teamRepo,
+          threads: threadRepo,
+          auditRepo,
+          records: moderationRecords,
+          applications: applicationRepo,
+          messages: messageRepo,
+          // Cleanup always re-queues through the real worker, even when
+          // the services' queue is wrapped to simulate an outage.
+          moderationQueue: inProcessQueue,
+        },
+        opts.cleanup ?? {},
+      ),
     },
+    rateLimits,
     ...(opts.adminEmails
       ? { adminEmails: new Set(opts.adminEmails.map((e) => normalizeEmail(e))) }
       : {}),
@@ -181,11 +228,42 @@ export function buildTestApp(
   }
 }
 
+export type TestApp = ReturnType<typeof buildTestApp>
+
 export const authHeader = (email: string) => ({ authorization: `Bearer dev:${email}` })
 export const jsonHeaders = (email: string) => ({
   ...authHeader(email),
   'content-type': 'application/json',
 })
+
+/**
+ * Register the user (login == first use) and give them a participation
+ * record in the event — the eligibility gate every team action requires.
+ * `isAdult: true` is ignored by events without an adult check.
+ */
+export async function joinEvent(
+  t: Pick<TestApp, 'app'>,
+  slug: string,
+  email: string,
+  intent: ParticipantIntent = 'has_team',
+): Promise<void> {
+  const res = await t.app.request(`/api/events/${slug}/participation`, {
+    method: 'PUT',
+    headers: jsonHeaders(email),
+    body: JSON.stringify({ intent, preferredRoles: [], skills: [], blurb: '', isAdult: true }),
+  })
+  if (res.status !== 200) {
+    throw new Error(`joinEvent(${slug}, ${email}) failed: ${res.status} ${await res.text()}`)
+  }
+}
+
+/** Resolve a user's id (provisioning them if needed). */
+export async function userIdOf(t: Pick<TestApp, 'app' | 'userRepo'>, email: string): Promise<string> {
+  await t.app.request('/api/me', { headers: authHeader(email) })
+  const record = await t.userRepo.findByLookup(emailLookupHmac(email, TEST_PEPPER))
+  if (!record) throw new Error(`user ${email} not provisioned`)
+  return record.id
+}
 
 /** Clone a seed with overrides, keeping tests free of hardcoded rules. */
 export function seedVariant(

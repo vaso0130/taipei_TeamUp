@@ -1,7 +1,7 @@
 import { uuidv7 } from 'uuidv7'
 import type { ReportReason } from '@teamup/shared'
 import type { AuditLogger } from '../audit/log.js'
-import type { ModerationQueue } from '../moderation/service.js'
+import { safeEnqueue, type ModerationQueue } from '../moderation/service.js'
 import type { ParticipantRepository } from '../participants/repository.js'
 import type { TeamRepository } from '../teams/repository.js'
 import type { ContentReportRepository } from './content-repository.js'
@@ -45,7 +45,7 @@ export class ContentReportService {
     if (team.pitchVisibility === 'published' && team.pitch !== '') {
       await this.deps.teams.update(teamId, { pitchVisibility: 'pending_review' })
     }
-    await this.deps.moderationQueue.enqueue({ type: 'reported_team_pitch', teamId })
+    await safeEnqueue(this.deps.moderationQueue, { type: 'reported_team_pitch', teamId })
     await this.deps.audit?.log('content_report', {
       actorUserId: reporterId,
       targetType: 'team',
@@ -69,7 +69,7 @@ export class ContentReportService {
     if (participation.blurbVisibility === 'published') {
       await this.deps.participants.updateBlurbVisibility(eventSlug, userId, 'pending_review')
     }
-    await this.deps.moderationQueue.enqueue({ type: 'reported_blurb', eventSlug, userId })
+    await safeEnqueue(this.deps.moderationQueue, { type: 'reported_blurb', eventSlug, userId })
     await this.deps.audit?.log('content_report', {
       actorUserId: reporterId,
       targetType: 'participant',

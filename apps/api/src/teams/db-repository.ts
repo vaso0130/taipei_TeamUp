@@ -35,6 +35,7 @@ const toRecord = (eventSlug: string, row: TeamRow): TeamRecord => ({
   ownerUserId: row.ownerUserId,
   memberCount: row.memberCount,
   createdAt: row.createdAt.toISOString(),
+  updatedAt: row.updatedAt.toISOString(),
 })
 
 export class DbTeamRepository implements TeamRepository {

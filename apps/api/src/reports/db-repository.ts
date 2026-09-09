@@ -72,4 +72,13 @@ export class DbReportRepository implements ReportRepository {
       .orderBy(desc(messageReports.createdAt))
     return rows.map(toRecord)
   }
+
+  async listByReporter(reporterUserId: string): Promise<ReportRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(messageReports)
+      .where(eq(messageReports.reporterUserId, reporterUserId))
+      .orderBy(desc(messageReports.createdAt))
+    return rows.map(toRecord)
+  }
 }

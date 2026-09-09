@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ModerationContext, ModerationVerdict } from '../src/moderation/moderator.js'
 import { loadEventSeeds } from '../src/events/seed-loader.js'
-import { authHeader, buildTestApp, jsonHeaders, openRecruitWindow } from './helpers.js'
+import { authHeader, buildTestApp, joinEvent, jsonHeaders, openRecruitWindow } from './helpers.js'
 
 const seeds = loadEventSeeds()
 const seed = openRecruitWindow(seeds.find((s) => s.event.exclusiveMembership)!)
@@ -24,12 +24,14 @@ const throwingOnName = {
   },
 }
 
-const createTeam = (t: ReturnType<typeof buildTestApp>, email: string, name: string) =>
-  t.app.request(`/api/events/${SLUG}/teams`, {
+const createTeam = async (t: ReturnType<typeof buildTestApp>, email: string, name: string) => {
+  await joinEvent(t, SLUG, email)
+  return t.app.request(`/api/events/${SLUG}/teams`, {
     method: 'POST',
     headers: jsonHeaders(email),
     body: JSON.stringify({ name }),
   })
+}
 
 describe('public name screening', () => {
   it('refuses a team whose name fails screening', async () => {

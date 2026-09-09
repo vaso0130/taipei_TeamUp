@@ -4,6 +4,7 @@ import { loadEventSeeds } from '../src/events/seed-loader.js'
 import {
   authHeader,
   buildTestApp,
+  joinEvent,
   jsonHeaders,
   openRecruitWindow,
 } from './helpers.js'
@@ -107,6 +108,7 @@ describe('admin stats', () => {
     await putParticipation(tagged.event.slug, 'seeker@example.com', {})
     await putParticipation(tagged.event.slug, 'visitor@example.com', { intent: 'browsing' })
     await t.app.request('/api/me', { headers: authHeader('lurker@example.com') })
+    await joinEvent(t, tagged.event.slug, 'ownerx@example.com')
     const teamRes = await t.app.request(`/api/events/${tagged.event.slug}/teams`, {
       method: 'POST',
       headers: jsonHeaders('ownerx@example.com'),

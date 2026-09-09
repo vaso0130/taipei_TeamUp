@@ -13,6 +13,8 @@ export interface ParticipationRecord {
   /** null = the event never asked (requiresAdultCheck = false). */
   isAdult: boolean | null
   guardianConsentConfirmed: boolean
+  /** Last write — drives the stale-review re-queue; set by the repository. */
+  updatedAt?: string
 }
 
 export interface ParticipantRepository {

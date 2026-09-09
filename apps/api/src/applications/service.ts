@@ -1,8 +1,9 @@
 import { uuidv7 } from 'uuidv7'
-import type { ApplicationView } from '@teamup/shared'
+import type { ApplicationView, EventConfig } from '@teamup/shared'
 import type { FieldCipher } from '../crypto/envelope.js'
 import type { EventRepository } from '../events/repository.js'
-import type { ModerationQueue } from '../moderation/service.js'
+import { safeEnqueue, type ModerationQueue } from '../moderation/service.js'
+import type { ParticipantRepository } from '../participants/repository.js'
 import { joinOptions, recruitWindowOpen } from '../teams/service.js'
 import type { TeamRepository } from '../teams/repository.js'
 import type { UserRepository } from '../users/repository.js'
@@ -25,11 +26,32 @@ export type ApplicationErrorCode =
   | 'forbidden'
   | 'team_full'
   | 'user_not_found'
+  | 'participation_required'
 
 export class ApplicationError extends Error {
   constructor(public readonly code: ApplicationErrorCode) {
     super(code)
     this.name = 'ApplicationError'
+  }
+}
+
+/**
+ * Event eligibility gate (H-4): joining a team in an event requires a
+ * participation record in THAT event, and — when the event asks — an
+ * answered adult check. Everything else about the person (roles, blurb)
+ * is optional; this is the minimum that makes the event's own rules
+ * enforceable. Also closes cross-event invitations: an invitee who never
+ * joined the event cannot be pulled into it.
+ */
+export async function assertEventParticipant(
+  participants: ParticipantRepository,
+  event: EventConfig,
+  userId: string,
+): Promise<void> {
+  const participation = await participants.get(event.slug, userId)
+  if (!participation) throw new ApplicationError('participation_required')
+  if (event.requiresAdultCheck && participation.isAdult === null) {
+    throw new ApplicationError('participation_required')
   }
 }
 
@@ -41,11 +63,17 @@ export class ApplicationService {
     private readonly apps: ApplicationRepository,
     private readonly cipher: FieldCipher,
     private readonly moderationQueue: ModerationQueue,
+    private readonly participants: ParticipantRepository,
   ) {}
 
   private async moderateIfNeeded(record: ApplicationRecord): Promise<ApplicationRecord> {
     if (record.messageCiphertext && record.messageVisibility === 'pending_review') {
-      await this.moderationQueue.enqueue({ type: 'application_message', applicationId: record.id })
+      // An enqueue failure leaves the message pending (never published);
+      // the cleanup job re-queues stale pending content.
+      await safeEnqueue(this.moderationQueue, {
+        type: 'application_message',
+        applicationId: record.id,
+      })
       return (await this.apps.getById(record.id)) ?? record
     }
     return record
@@ -63,6 +91,7 @@ export class ApplicationService {
     const { team, event } = await this.requireTeamAndEvent(teamId)
     if (team.status !== 'recruiting') throw new ApplicationError('not_recruiting')
     if (!recruitWindowOpen(event)) throw new ApplicationError('recruiting_closed')
+    await assertEventParticipant(this.participants, event, joinerUserId)
     if (await this.teams.isActiveMember(teamId, joinerUserId)) {
       throw new ApplicationError('already_in_this_team')
     }
@@ -134,7 +163,9 @@ export class ApplicationService {
    * Accept/reject. Applies: the team owner decides. Invites: the
    * invitee decides. Acceptance performs the atomic join — capacity and
    * exclusivity are re-checked inside the repository transaction, so a
-   * stale accept can never overfill a team.
+   * stale accept can never overfill a team. Every status write is a
+   * guarded pending→X transition, so concurrent deciders cannot overwrite
+   * each other (the loser sees not_pending).
    */
   async respond(
     applicationId: string,
@@ -150,19 +181,28 @@ export class ApplicationService {
     if (byUserId !== decider) throw new ApplicationError('forbidden')
 
     if (action === 'reject') {
-      await this.apps.updateStatus(record.id, 'rejected')
+      if (!(await this.apps.updateStatus(record.id, 'rejected'))) {
+        throw new ApplicationError('not_pending')
+      }
       return this.toView({ ...record, status: 'rejected' }, byUserId)
     }
 
     if (!recruitWindowOpen(event)) throw new ApplicationError('recruiting_closed')
+    // A team that stopped recruiting cannot take on old applications;
+    // `full` maps to the more specific code.
+    if (team.status === 'full') throw new ApplicationError('team_full')
+    if (team.status !== 'recruiting') throw new ApplicationError('not_recruiting')
+    await assertEventParticipant(this.participants, event, record.applicantId)
+
     const joined = await this.teams.addMember(record.teamId, record.applicantId, joinOptions(event))
     if (!joined.ok) {
       switch (joined.reason) {
         case 'team_full':
           throw new ApplicationError('team_full')
         case 'already_in_this_team':
-          // Already a member somehow — the application is moot.
-          await this.apps.updateStatus(record.id, 'withdrawn')
+          // Only one pending row exists per (team, user), so this is a
+          // concurrent accept of the same application: the other call
+          // owns the status transition — never overwrite it.
           throw new ApplicationError('not_pending')
         case 'already_in_another_team':
           throw new ApplicationError('already_in_team')
@@ -185,7 +225,9 @@ export class ApplicationService {
     const { team } = await this.requireTeamAndEvent(record.teamId)
     const canceler = record.direction === 'apply' ? record.applicantId : team.ownerUserId
     if (byUserId !== canceler) throw new ApplicationError('forbidden')
-    await this.apps.updateStatus(record.id, 'withdrawn')
+    if (!(await this.apps.updateStatus(record.id, 'withdrawn'))) {
+      throw new ApplicationError('not_pending')
+    }
   }
 
   /** Everything where the user is the (would-be) joiner: sent applies + received invites. */
@@ -212,8 +254,11 @@ export class ApplicationService {
     const applicant = await this.users.findById(record.applicantId)
     const senderId =
       record.direction === 'apply' ? record.applicantId : (team?.ownerUserId ?? null)
+    // Blocked text is shown to no one — not even its author (same rule
+    // as messages); otherwise the author always sees their own words.
     const canSeeMessage =
-      viewerUserId === senderId || record.messageVisibility === 'published'
+      record.messageVisibility !== 'blocked' &&
+      (viewerUserId === senderId || record.messageVisibility === 'published')
     let message: string | null = null
     if (canSeeMessage && record.messageCiphertext) {
       message = await this.cipher.decrypt(record.messageCiphertext)

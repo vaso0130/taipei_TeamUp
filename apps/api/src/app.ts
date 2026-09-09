@@ -1,7 +1,9 @@
 import { Hono, type Context } from 'hono'
+import { bodyLimit } from 'hono/body-limit'
 import { cors } from 'hono/cors'
 import { createMiddleware } from 'hono/factory'
-import type { z, ZodType } from 'zod'
+import { requestId } from 'hono/request-id'
+import { z, type ZodType } from 'zod'
 import {
   AdminDecideSchema,
   ApplySchema,
@@ -20,10 +22,10 @@ import {
   type TeamStatus,
 } from '@teamup/shared'
 import { secureHeaders } from 'hono/secure-headers'
-import { AdminService } from './admin/service.js'
+import { AdminError, AdminService } from './admin/service.js'
 import { ApplicationError, type ApplicationService } from './applications/service.js'
 import { AuthError, type AuthIdentity, type TokenVerifier } from './auth/verifier.js'
-import { normalizeEmail } from './crypto/email.js'
+import { normalizeEmail, secretEquals } from './crypto/email.js'
 import type { EventRepository } from './events/repository.js'
 import { SlidingWindowLimiter } from './http/rate-limit.js'
 import { MessagingError, type MessagingService } from './messaging/service.js'
@@ -50,6 +52,64 @@ export interface AuthedDeps {
   cleanup: CleanupService
 }
 
+/**
+ * Per-account abuse limits (spec §8). These are PLATFORM rules — how
+ * much load one account may put on paid/expensive paths — not event
+ * rules, so they live here with environment overrides (RATE_LIMIT_*).
+ */
+export interface RateLimitConfig {
+  teamCreatesPerDay: number
+  messagesPerHour: number
+  reportsPerHour: number
+  /** Nickname and team-name changes (each one is an inline model review). */
+  nameChangesPerHour: number
+  participationWritesPerHour: number
+  invitationsPerDay: number
+  appliesPerDay: number
+  /** Full export decrypts every field through KMS. */
+  exportsPerDay: number
+}
+
+export const DEFAULT_RATE_LIMITS: RateLimitConfig = {
+  teamCreatesPerDay: 3,
+  messagesPerHour: 30,
+  reportsPerHour: 10,
+  nameChangesPerHour: 10,
+  participationWritesPerHour: 20,
+  invitationsPerDay: 20,
+  appliesPerDay: 20,
+  exportsPerDay: 3,
+}
+
+const RATE_LIMIT_ENV: Record<keyof RateLimitConfig, string> = {
+  teamCreatesPerDay: 'RATE_LIMIT_TEAM_CREATES_PER_DAY',
+  messagesPerHour: 'RATE_LIMIT_MESSAGES_PER_HOUR',
+  reportsPerHour: 'RATE_LIMIT_REPORTS_PER_HOUR',
+  nameChangesPerHour: 'RATE_LIMIT_NAME_CHANGES_PER_HOUR',
+  participationWritesPerHour: 'RATE_LIMIT_PARTICIPATION_WRITES_PER_HOUR',
+  invitationsPerDay: 'RATE_LIMIT_INVITATIONS_PER_DAY',
+  appliesPerDay: 'RATE_LIMIT_APPLIES_PER_DAY',
+  exportsPerDay: 'RATE_LIMIT_EXPORTS_PER_DAY',
+}
+
+/** Defaults overridden by positive-integer RATE_LIMIT_* environment values. */
+export function rateLimitsFromEnv(env: NodeJS.ProcessEnv = process.env): RateLimitConfig {
+  const config = { ...DEFAULT_RATE_LIMITS }
+  for (const key of Object.keys(RATE_LIMIT_ENV) as (keyof RateLimitConfig)[]) {
+    const raw = env[RATE_LIMIT_ENV[key]]
+    if (raw === undefined || raw === '') continue
+    const value = Number(raw)
+    if (!Number.isInteger(value) || value < 1) {
+      throw new Error(`${RATE_LIMIT_ENV[key]} must be a positive integer`)
+    }
+    config[key] = value
+  }
+  return config
+}
+
+/** Maximum JSON body accepted on any route (the largest field is a 1000-char message). */
+export const MAX_BODY_BYTES = 64 * 1024
+
 export interface AppDeps {
   events: EventRepository
   /** Absent in seed-file read-only mode (ADR-004): data routes return 503. */
@@ -66,12 +126,15 @@ export interface AppDeps {
    * no CORS headers (same-origin deployments and local dev proxy).
    */
   allowedOrigins?: string[]
+  /** Per-account limits; defaults when absent. */
+  rateLimits?: RateLimitConfig
 }
 
 interface AppEnv {
   Variables: {
     auth: AuthIdentity
     user: UserRecord
+    requestId: string
   }
 }
 
@@ -98,16 +161,33 @@ const TEAM_ERROR_STATUS: Record<string, 404 | 400 | 403 | 409> = {
   owner_cannot_leave: 409,
   team_not_empty: 409,
   contacts_not_allowed_yet: 409,
+  /** The caller must join the event (and answer its adult check) first. */
+  participation_required: 409,
 }
+
+const HOUR_MS = 60 * 60 * 1000
+const DAY_MS = 24 * HOUR_MS
+const UuidSchema = z.string().uuid()
 
 export function createApp(deps: AppDeps) {
   const app = new Hono<AppEnv>()
   const authed = deps.authed
+  const limits = deps.rateLimits ?? DEFAULT_RATE_LIMITS
+
+  app.use(requestId())
 
   // Security headers (spec §8); HSTS per §7.1.
   app.use(
     secureHeaders({
       strictTransportSecurity: 'max-age=31536000; includeSubDomains; preload',
+    }),
+  )
+
+  // Request bodies are small JSON documents; anything larger is abuse.
+  app.use(
+    bodyLimit({
+      maxSize: MAX_BODY_BYTES,
+      onError: (c) => c.json({ error: 'payload_too_large' }, 413),
     }),
   )
 
@@ -127,14 +207,20 @@ export function createApp(deps: AppDeps) {
 
   // Abuse limits (spec §8): per-account sliding windows. IP-level
   // throttling and reCAPTCHA run at the edge in production.
-  const teamCreateLimiter = new SlidingWindowLimiter(3, 24 * 60 * 60 * 1000)
-  const messageLimiter = new SlidingWindowLimiter(30, 60 * 60 * 1000)
-  const reportLimiter = new SlidingWindowLimiter(10, 60 * 60 * 1000)
+  const teamCreateLimiter = new SlidingWindowLimiter(limits.teamCreatesPerDay, DAY_MS)
+  const messageLimiter = new SlidingWindowLimiter(limits.messagesPerHour, HOUR_MS)
+  const reportLimiter = new SlidingWindowLimiter(limits.reportsPerHour, HOUR_MS)
+  const nameChangeLimiter = new SlidingWindowLimiter(limits.nameChangesPerHour, HOUR_MS)
+  const participationLimiter = new SlidingWindowLimiter(limits.participationWritesPerHour, HOUR_MS)
+  const inviteLimiter = new SlidingWindowLimiter(limits.invitationsPerDay, DAY_MS)
+  const applyLimiter = new SlidingWindowLimiter(limits.appliesPerDay, DAY_MS)
+  const exportLimiter = new SlidingWindowLimiter(limits.exportsPerDay, DAY_MS)
+
+  const rateLimited = (c: Context<AppEnv>) =>
+    c.json({ error: 'rate_limited', message: '操作太頻繁，請稍後再試' }, 429)
   const limited = (limiter: SlidingWindowLimiter) =>
     createMiddleware<AppEnv>(async (c, next) => {
-      if (!limiter.allow(c.get('user').id)) {
-        return c.json({ error: 'rate_limited', message: '操作太頻繁，請稍後再試' }, 429)
-      }
+      if (!limiter.allow(c.get('user').id)) return rateLimited(c)
       await next()
     })
 
@@ -146,6 +232,19 @@ export function createApp(deps: AppDeps) {
         if (!token || !(await deps.captcha.verify(token, action))) {
           return c.json({ error: 'captcha_failed', message: '驗證失敗，請重新操作' }, 400)
         }
+      }
+      await next()
+    })
+
+  /**
+   * Path ids must be UUIDs before they reach a query: a malformed id is
+   * simply "no such resource" (404 with the resource's own code) instead
+   * of a database type error surfacing as 500.
+   */
+  const uuidParam = (name: string, notFoundCode: string) =>
+    createMiddleware<AppEnv>(async (c, next) => {
+      if (!UuidSchema.safeParse(c.req.param(name)).success) {
+        return c.json({ error: notFoundCode }, 404)
       }
       await next()
     })
@@ -248,7 +347,7 @@ export function createApp(deps: AppDeps) {
   }
 
   const domainError = (c: Context<AppEnv>, err: unknown) => {
-    if (err instanceof MessagingError) {
+    if (err instanceof MessagingError || err instanceof AdminError) {
       return c.json({ error: err.code }, TEAM_ERROR_STATUS[err.code] ?? 400)
     }
     if (err instanceof TeamError || err instanceof ApplicationError) {
@@ -285,19 +384,25 @@ export function createApp(deps: AppDeps) {
   app.patch('/api/me', async (c) => {
     const body = await parseBody(c, UpdateMeSchema)
     if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
+    const user = c.get('user')
+    // Unchanged name: nothing to review, nothing to write.
+    if (body.data.displayName === user.displayName) {
+      return c.json({ displayName: user.displayName })
+    }
+    if (!nameChangeLimiter.allow(user.id)) return rateLimited(c)
     const screened = await authed!.moderation.screenName(
       body.data.displayName,
       'display_name',
-      c.get('user').id,
-      c.get('user').id,
+      user.id,
+      user.id,
     )
     if (screened !== 'ok') return nameScreenError(c, screened)
-    await authed!.users.updateDisplayName(c.get('user').id, body.data.displayName)
+    await authed!.users.updateDisplayName(user.id, body.data.displayName)
     return c.json({ displayName: body.data.displayName })
   })
 
   /** One-click data export (spec §6.5). */
-  app.get('/api/me/export', async (c) => {
+  app.get('/api/me/export', limited(exportLimiter), async (c) => {
     return c.json(await authed!.privacy.exportData(c.get('user')))
   })
 
@@ -317,7 +422,7 @@ export function createApp(deps: AppDeps) {
     return c.json(view)
   })
 
-  app.put('/api/events/:slug/participation', async (c) => {
+  app.put('/api/events/:slug/participation', limited(participationLimiter), async (c) => {
     const body = await parseBody(c, ParticipationInputSchema)
     if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
     try {
@@ -362,32 +467,35 @@ export function createApp(deps: AppDeps) {
     limited(teamCreateLimiter),
     captchaGuard('create_team'),
     async (c) => {
-    const body = await parseBody(c, CreateTeamSchema)
-    if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
-    // Public names are screened inline (accept-or-refuse; no hidden state).
-    const screened = await authed!.moderation.screenName(
-      body.data.name,
-      'team_name',
-      c.get('user').id,
-      c.get('user').id,
-    )
-    if (screened !== 'ok') return nameScreenError(c, screened)
-    try {
-      return c.json(
-        await authed!.teams.createTeam(c.req.param('slug'), c.get('user').id, body.data),
-        201,
+      const body = await parseBody(c, CreateTeamSchema)
+      if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
+      // Public names are screened inline (accept-or-refuse; no hidden state).
+      const screened = await authed!.moderation.screenName(
+        body.data.name,
+        'team_name',
+        c.get('user').id,
+        c.get('user').id,
       )
-    } catch (err) {
-      return domainError(c, err)
-    }
-  })
+      if (screened !== 'ok') return nameScreenError(c, screened)
+      try {
+        return c.json(
+          await authed!.teams.createTeam(c.req.param('slug'), c.get('user').id, body.data),
+          201,
+        )
+      } catch (err) {
+        return domainError(c, err)
+      }
+    },
+  )
 
   app.get('/api/events/:slug/my-team', authenticate, async (c) => {
     const team = await authed!.teams.myTeam(c.req.param('slug'), c.get('user').id)
     return c.json({ team })
   })
 
-  app.get('/api/teams/:id', requireData, maybeAuthenticate, async (c) => {
+  const teamId = uuidParam('id', 'team_not_found')
+
+  app.get('/api/teams/:id', requireData, maybeAuthenticate, teamId, async (c) => {
     try {
       const viewer = c.var.user as UserRecord | undefined
       return c.json(await authed!.teams.getTeamDetail(c.req.param('id'), viewer?.id ?? null))
@@ -396,27 +504,31 @@ export function createApp(deps: AppDeps) {
     }
   })
 
-  app.patch('/api/teams/:id', authenticate, async (c) => {
+  app.patch('/api/teams/:id', authenticate, teamId, async (c) => {
     const body = await parseBody(c, UpdateTeamSchema)
     if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
-    if (body.data.name !== undefined) {
-      const screened = await authed!.moderation.screenName(
-        body.data.name,
-        'team_name',
-        c.req.param('id'),
-        c.get('user').id,
-      )
-      if (screened !== 'ok') return nameScreenError(c, screened)
-    }
     try {
-      return c.json(await authed!.teams.updateTeam(c.req.param('id'), c.get('user').id, body.data))
+      // Authorization BEFORE any paid work: only the owner may trigger a
+      // name review, and only for a name that actually changes.
+      const team = await authed!.teams.requireOwner(c.req.param('id'), c.get('user').id)
+      if (body.data.name !== undefined && body.data.name !== team.name) {
+        if (!nameChangeLimiter.allow(c.get('user').id)) return rateLimited(c)
+        const screened = await authed!.moderation.screenName(
+          body.data.name,
+          'team_name',
+          team.id,
+          c.get('user').id,
+        )
+        if (screened !== 'ok') return nameScreenError(c, screened)
+      }
+      return c.json(await authed!.teams.updateTeam(team.id, c.get('user').id, body.data))
     } catch (err) {
       return domainError(c, err)
     }
   })
 
   /** Owner deletes their own (sole-member) team. */
-  app.delete('/api/teams/:id', authenticate, async (c) => {
+  app.delete('/api/teams/:id', authenticate, teamId, async (c) => {
     try {
       await authed!.teams.deleteTeam(c.req.param('id'), c.get('user').id)
       return c.json({ deleted: true })
@@ -425,7 +537,7 @@ export function createApp(deps: AppDeps) {
     }
   })
 
-  app.put('/api/teams/:id/contacts', authenticate, async (c) => {
+  app.put('/api/teams/:id/contacts', authenticate, teamId, async (c) => {
     const body = await parseBody(c, ContactsSchema)
     if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
     try {
@@ -437,7 +549,7 @@ export function createApp(deps: AppDeps) {
     }
   })
 
-  app.post('/api/teams/:id/leave', authenticate, async (c) => {
+  app.post('/api/teams/:id/leave', authenticate, teamId, async (c) => {
     try {
       await authed!.teams.leaveTeam(c.req.param('id'), c.get('user').id)
       return c.json({ left: true })
@@ -448,20 +560,27 @@ export function createApp(deps: AppDeps) {
 
   // ---- applications ----
 
-  app.post('/api/teams/:id/applications', authenticate, captchaGuard('apply_team'), async (c) => {
-    const body = await parseBody(c, ApplySchema)
-    if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
-    try {
-      return c.json(
-        await authed!.applications.apply(c.req.param('id'), c.get('user').id, body.data.message),
-        201,
-      )
-    } catch (err) {
-      return domainError(c, err)
-    }
-  })
+  app.post(
+    '/api/teams/:id/applications',
+    authenticate,
+    teamId,
+    limited(applyLimiter),
+    captchaGuard('apply_team'),
+    async (c) => {
+      const body = await parseBody(c, ApplySchema)
+      if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
+      try {
+        return c.json(
+          await authed!.applications.apply(c.req.param('id'), c.get('user').id, body.data.message),
+          201,
+        )
+      } catch (err) {
+        return domainError(c, err)
+      }
+    },
+  )
 
-  app.post('/api/teams/:id/invitations', authenticate, async (c) => {
+  app.post('/api/teams/:id/invitations', authenticate, teamId, limited(inviteLimiter), async (c) => {
     const body = await parseBody(c, InviteSchema)
     if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
     try {
@@ -479,7 +598,7 @@ export function createApp(deps: AppDeps) {
     }
   })
 
-  app.get('/api/teams/:id/applications', authenticate, async (c) => {
+  app.get('/api/teams/:id/applications', authenticate, teamId, async (c) => {
     try {
       return c.json({
         applications: await authed!.applications.listForTeam(c.req.param('id'), c.get('user').id),
@@ -495,7 +614,9 @@ export function createApp(deps: AppDeps) {
     })
   })
 
-  app.post('/api/applications/:id/respond', authenticate, async (c) => {
+  const applicationId = uuidParam('id', 'application_not_found')
+
+  app.post('/api/applications/:id/respond', authenticate, applicationId, async (c) => {
     const body = await parseBody(c, RespondSchema)
     if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
     try {
@@ -507,7 +628,7 @@ export function createApp(deps: AppDeps) {
     }
   })
 
-  app.post('/api/applications/:id/withdraw', authenticate, async (c) => {
+  app.post('/api/applications/:id/withdraw', authenticate, applicationId, async (c) => {
     try {
       await authed!.applications.withdraw(c.req.param('id'), c.get('user').id)
       return c.json({ withdrawn: true })
@@ -542,7 +663,9 @@ export function createApp(deps: AppDeps) {
     }
   })
 
-  app.get('/api/threads/:id', authenticate, async (c) => {
+  const threadId = uuidParam('id', 'thread_not_found')
+
+  app.get('/api/threads/:id', authenticate, threadId, async (c) => {
     try {
       return c.json(await authed!.messaging.getThread(c.req.param('id'), c.get('user').id))
     } catch (err) {
@@ -550,7 +673,7 @@ export function createApp(deps: AppDeps) {
     }
   })
 
-  app.get('/api/threads/:id/messages', authenticate, async (c) => {
+  app.get('/api/threads/:id/messages', authenticate, threadId, async (c) => {
     try {
       return c.json({
         messages: await authed!.messaging.listMessages(c.req.param('id'), c.get('user').id),
@@ -560,7 +683,7 @@ export function createApp(deps: AppDeps) {
     }
   })
 
-  app.post('/api/threads/:id/messages', authenticate, limited(messageLimiter), async (c) => {
+  app.post('/api/threads/:id/messages', authenticate, threadId, limited(messageLimiter), async (c) => {
     const body = await parseBody(c, SendMessageSchema)
     if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
     try {
@@ -574,19 +697,25 @@ export function createApp(deps: AppDeps) {
   })
 
   /** Report a counterpart's message → escalation re-review (spec §5). */
-  app.post('/api/messages/:id/report', authenticate, limited(reportLimiter), async (c) => {
-    const body = await parseBody(c, ReportMessageSchema)
-    if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
-    try {
-      await authed!.messaging.report(c.req.param('id'), c.get('user').id, body.data.reason)
-      return c.json({ reported: true }, 201)
-    } catch (err) {
-      return domainError(c, err)
-    }
-  })
+  app.post(
+    '/api/messages/:id/report',
+    authenticate,
+    uuidParam('id', 'message_not_found'),
+    limited(reportLimiter),
+    async (c) => {
+      const body = await parseBody(c, ReportMessageSchema)
+      if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
+      try {
+        await authed!.messaging.report(c.req.param('id'), c.get('user').id, body.data.reason)
+        return c.json({ reported: true }, 201)
+      } catch (err) {
+        return domainError(c, err)
+      }
+    },
+  )
 
   /** Report a team's public content → escalation re-review. */
-  app.post('/api/teams/:id/report', authenticate, limited(reportLimiter), async (c) => {
+  app.post('/api/teams/:id/report', authenticate, teamId, limited(reportLimiter), async (c) => {
     const body = await parseBody(c, ReportMessageSchema)
     if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
     try {
@@ -601,6 +730,7 @@ export function createApp(deps: AppDeps) {
   app.post(
     '/api/events/:slug/participants/:userId/report',
     authenticate,
+    uuidParam('userId', 'participant_not_found'),
     limited(reportLimiter),
     async (c) => {
       const body = await parseBody(c, ReportMessageSchema)
@@ -639,11 +769,16 @@ export function createApp(deps: AppDeps) {
     return c.json({ items: await authed!.admin.listRiskMessages() })
   })
 
-  /** Full decrypted thread for review — the read is audit-logged. */
-  app.get('/api/admin/threads/:id', async (c) => {
-    const thread = await authed!.admin.getThreadForReview(c.req.param('id'), c.get('user').id)
-    if (!thread) return c.json({ error: 'thread_not_found' }, 404)
-    return c.json(thread)
+  /**
+   * Full decrypted thread for review — risk-relevant threads only, and
+   * the read is audit-logged before any content is returned.
+   */
+  app.get('/api/admin/threads/:id', threadId, async (c) => {
+    try {
+      return c.json(await authed!.admin.getThreadForReview(c.req.param('id'), c.get('user').id))
+    } catch (err) {
+      return domainError(c, err)
+    }
   })
 
   /** Member roster (metadata only — never email or content). */
@@ -661,14 +796,16 @@ export function createApp(deps: AppDeps) {
   })
 
   /** Admin force-disband a team (members cascade out; audit-logged). */
-  app.delete('/api/admin/teams/:id', async (c) => {
+  app.delete('/api/admin/teams/:id', teamId, async (c) => {
     const done = await authed!.admin.deleteTeam(c.req.param('id'), c.get('user').id)
     if (!done) return c.json({ error: 'team_not_found' }, 404)
     return c.json({ deleted: true })
   })
 
+  const adminUserId = uuidParam('id', 'user_not_found')
+
   /** Manual suspension; strike-exempt (admin) accounts are refused. */
-  app.post('/api/admin/users/:id/suspend', async (c) => {
+  app.post('/api/admin/users/:id/suspend', adminUserId, async (c) => {
     const result = await authed!.moderation.suspend(c.req.param('id'), c.get('user').id)
     if (result === 'exempt') return c.json({ error: 'cannot_suspend_admin' }, 403)
     if (result === 'not_active') return c.json({ error: 'not_active' }, 409)
@@ -676,14 +813,14 @@ export function createApp(deps: AppDeps) {
   })
 
   /** Lift a suspension (also resets the current strike window). */
-  app.post('/api/admin/users/:id/reactivate', async (c) => {
+  app.post('/api/admin/users/:id/reactivate', adminUserId, async (c) => {
     const done = await authed!.moderation.reactivate(c.req.param('id'), c.get('user').id)
     if (!done) return c.json({ error: 'not_suspended' }, 409)
     return c.json({ reactivated: true })
   })
 
   /** One user's moderation history (strike view, no content). */
-  app.get('/api/admin/users/:id/moderation', async (c) => {
+  app.get('/api/admin/users/:id/moderation', adminUserId, async (c) => {
     const history = await authed!.admin.getUserModeration(c.req.param('id'))
     if (!history) return c.json({ error: 'user_not_found' }, 404)
     return c.json(history)
@@ -696,33 +833,43 @@ export function createApp(deps: AppDeps) {
     return c.json({ decided: true })
   })
 
-  // ---- Cloud Tasks worker callback (spec §5.2) ----
+  // ---- internal callbacks (Cloud Tasks worker, Cloud Scheduler cleanup) ----
 
-  app.post('/internal/moderation/tasks', async (c) => {
+  /** Shared-secret gate; constant-time comparison, absent config → route does not exist. */
+  const requireTaskSecret = createMiddleware<AppEnv>(async (c, next) => {
     if (!authed || !deps.taskSecret) return c.json({ error: 'not_found' }, 404)
-    if (c.req.header('x-task-secret') !== deps.taskSecret) {
+    if (!secretEquals(c.req.header('x-task-secret'), deps.taskSecret)) {
       return c.json({ error: 'unauthorized' }, 401)
     }
+    await next()
+  })
+
+  app.post('/internal/moderation/tasks', requireTaskSecret, async (c) => {
     const body = await parseBody(c, ModerationTaskSchema)
     if (!body.ok) return c.json({ error: 'validation_failed', issues: body.issues }, 400)
-    const visibility = await authed.moderation.processAsync(body.data.target)
+    const visibility = await authed!.moderation.processAsync(body.data.target)
     return c.json({ processed: true, visibility })
   })
 
-  // ---- Cloud Scheduler cleanup callback (spec §6.4) ----
-
-  app.post('/internal/cleanup', async (c) => {
-    if (!authed || !deps.taskSecret) return c.json({ error: 'not_found' }, 404)
-    if (c.req.header('x-task-secret') !== deps.taskSecret) {
-      return c.json({ error: 'unauthorized' }, 401)
-    }
-    return c.json(await authed.cleanup.run())
+  app.post('/internal/cleanup', requireTaskSecret, async (c) => {
+    return c.json(await authed!.cleanup.run())
   })
 
   app.notFound((c) => c.json({ error: 'not_found' }, 404))
   app.onError((err, c) => {
-    // Never leak internals to clients; details go to logs only.
-    console.error(err)
+    // Never leak internals to clients; logs get the error class and
+    // message with the request coordinates — never the whole object
+    // (a database error object can carry SQL parameters, i.e. user data).
+    console.error(
+      JSON.stringify({
+        level: 'error',
+        requestId: c.get('requestId'),
+        method: c.req.method,
+        path: c.req.path,
+        error: err.name,
+        message: err.message,
+      }),
+    )
     return c.json({ error: 'internal_error' }, 500)
   })
 

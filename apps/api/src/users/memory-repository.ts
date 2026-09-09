@@ -1,10 +1,20 @@
-import { UniqueViolationError, type UserRecord, type UserRepository } from './repository.js'
+import {
+  UniqueViolationError,
+  type HardDeleteResult,
+  type UserRecord,
+  type UserRepository,
+} from './repository.js'
 
 /** In-memory implementation for unit tests. */
 export class MemoryUserRepository implements UserRepository {
   private readonly byId = new Map<string, UserRecord>()
   private readonly deletedAt = new Map<string, string>()
   private readonly createdAt = new Map<string, string>()
+  /**
+   * Test hook emulating a dangling foreign key: ids listed here refuse
+   * hard deletion the way PostgreSQL would (23503).
+   */
+  readonly undeletableIds = new Set<string>()
 
   findByLookup(lookup: Buffer): Promise<UserRecord | null> {
     for (const record of this.byId.values()) {
@@ -45,7 +55,15 @@ export class MemoryUserRepository implements UserRepository {
     const record = this.byId.get(id)
     if (record) record.status = status
     if (status === 'deleted') this.deletedAt.set(id, new Date().toISOString())
+    else this.deletedAt.delete(id)
     return Promise.resolve()
+  }
+
+  async updateEmailLookup(id: string, lookup: Buffer): Promise<void> {
+    const owner = await this.findByLookup(lookup)
+    if (owner && owner.id !== id) throw new UniqueViolationError('users_email_lookup_idx')
+    const record = this.byId.get(id)
+    if (record) record.emailLookup = Buffer.from(lookup)
   }
 
   countByStatus(): Promise<Record<UserRecord['status'], number>> {
@@ -54,15 +72,19 @@ export class MemoryUserRepository implements UserRepository {
     return Promise.resolve(counts)
   }
 
-  hardDeleteBefore(cutoff: Date): Promise<number> {
-    let count = 0
+  hardDeleteBefore(cutoff: Date): Promise<HardDeleteResult> {
+    let deleted = 0
+    let failed = 0
     for (const [id, at] of this.deletedAt) {
-      if (new Date(at) <= cutoff && this.byId.get(id)?.status === 'deleted') {
-        this.byId.delete(id)
-        this.deletedAt.delete(id)
-        count++
+      if (new Date(at) > cutoff || this.byId.get(id)?.status !== 'deleted') continue
+      if (this.undeletableIds.has(id)) {
+        failed++
+        continue
       }
+      this.byId.delete(id)
+      this.deletedAt.delete(id)
+      deleted++
     }
-    return Promise.resolve(count)
+    return Promise.resolve({ deleted, failed })
   }
 }

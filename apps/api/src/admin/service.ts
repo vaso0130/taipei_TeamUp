@@ -6,7 +6,7 @@ import type {
   RiskMessageItem,
   UserModerationHistory,
 } from '@teamup/shared'
-import type { ModerationTarget } from '../moderation/service.js'
+import { targetId, type ModerationTarget } from '../moderation/service.js'
 import type { ApplicationRepository } from '../applications/repository.js'
 import type { AuditLogger } from '../audit/log.js'
 import type { FieldCipher } from '../crypto/envelope.js'
@@ -17,11 +17,21 @@ import type { ReportRepository } from '../reports/repository.js'
 import type { TeamRepository } from '../teams/repository.js'
 import type { UserRepository } from '../users/repository.js'
 
+export type AdminErrorCode = 'forbidden' | 'thread_not_found'
+
+export class AdminError extends Error {
+  constructor(public readonly code: AdminErrorCode) {
+    super(code)
+    this.name = 'AdminError'
+  }
+}
+
 /**
  * Human review backend (spec §5.7). Admin access is enforced at the
  * route layer (ADMIN_EMAILS allowlist); this service aggregates the
  * pending queue across all moderated content types and decrypts
- * encrypted bodies for the reviewing admin.
+ * encrypted bodies for the reviewing admin. Every decrypting read is
+ * audit-logged FIRST and fails closed: no trail, no content (L-5).
  */
 export class AdminService {
   constructor(
@@ -73,14 +83,13 @@ export class AdminService {
   }
 
   async listPending(adminUserId: string): Promise<PendingModerationItem[]> {
-    // Reading the queue decrypts user content — that read is audited.
-    await this.deps.audit.log('admin_review_read', {
-      actorUserId: adminUserId,
-      targetType: 'moderation_queue',
-    })
-    const items: PendingModerationItem[] = []
     const nameOf = async (userId: string | null) =>
       userId ? ((await this.deps.users.findById(userId))?.displayName ?? '（未知）') : '（未知）'
+
+    // Gather first, decrypt last: the audit trail (one entry per item
+    // the admin is about to read) is written before any content leaves
+    // storage, and a failed trail write aborts the whole read.
+    const pending: { item: Omit<PendingModerationItem, 'content'>; content: () => Promise<string> }[] = []
 
     for (const p of await this.deps.participants.listPendingBlurbs()) {
       const target = {
@@ -88,55 +97,83 @@ export class AdminService {
         eventSlug: p.eventSlug,
         userId: p.userId,
       } as const
-      items.push({
-        target,
-        content: [
-          p.blurb,
-          p.customTags.length > 0 ? `自訂標籤：${p.customTags.join('、')}` : '',
-        ]
-          .filter((s) => s !== '')
-          .join('\n'),
-        authorDisplayName: await nameOf(p.userId),
-        visibility: p.blurbVisibility,
-        verdict: await this.verdictFor(target),
-        threadId: null,
+      const content = [
+        p.blurb,
+        p.customTags.length > 0 ? `自訂標籤：${p.customTags.join('、')}` : '',
+      ]
+        .filter((s) => s !== '')
+        .join('\n')
+      pending.push({
+        item: {
+          target,
+          authorDisplayName: await nameOf(p.userId),
+          visibility: p.blurbVisibility,
+          verdict: await this.verdictFor(target),
+          threadId: null,
+        },
+        content: () => Promise.resolve(content),
       })
     }
     for (const t of await this.deps.teams.listPendingPitches()) {
       const target = { type: 'team_pitch', teamId: t.id } as const
-      items.push({
-        target,
-        content: t.pitch,
-        authorDisplayName: await nameOf(t.ownerUserId),
-        visibility: t.pitchVisibility,
-        verdict: await this.verdictFor(target),
-        threadId: null,
+      pending.push({
+        item: {
+          target,
+          authorDisplayName: await nameOf(t.ownerUserId),
+          visibility: t.pitchVisibility,
+          verdict: await this.verdictFor(target),
+          threadId: null,
+        },
+        content: () => Promise.resolve(t.pitch),
       })
     }
     for (const a of await this.deps.applications.listPendingMessages()) {
-      if (!a.messageCiphertext) continue
+      const ciphertext = a.messageCiphertext
+      if (!ciphertext) continue
       const team = await this.deps.teams.getById(a.teamId)
       const senderId = a.direction === 'apply' ? a.applicantId : (team?.ownerUserId ?? null)
       const target = { type: 'application_message', applicationId: a.id } as const
-      items.push({
-        target,
-        content: await this.deps.cipher.decrypt(a.messageCiphertext),
-        authorDisplayName: await nameOf(senderId),
-        visibility: a.messageVisibility,
-        verdict: await this.verdictFor(target),
-        threadId: null,
+      pending.push({
+        item: {
+          target,
+          authorDisplayName: await nameOf(senderId),
+          visibility: a.messageVisibility,
+          verdict: await this.verdictFor(target),
+          threadId: null,
+        },
+        content: () => this.deps.cipher.decrypt(ciphertext),
       })
     }
     for (const m of await this.deps.messages.listPending()) {
       const target = { type: 'message', messageId: m.id } as const
-      items.push({
-        target,
-        content: await this.deps.cipher.decrypt(m.bodyCiphertext),
-        authorDisplayName: await nameOf(m.senderId),
-        visibility: m.visibility,
-        verdict: await this.verdictFor(target),
-        threadId: m.threadId,
+      pending.push({
+        item: {
+          target,
+          authorDisplayName: await nameOf(m.senderId),
+          visibility: m.visibility,
+          verdict: await this.verdictFor(target),
+          threadId: m.threadId,
+        },
+        content: () => this.deps.cipher.decrypt(m.bodyCiphertext),
       })
+    }
+
+    await this.deps.audit.logOrThrow('admin_review_read', {
+      actorUserId: adminUserId,
+      targetType: 'moderation_queue',
+      detail: `items=${pending.length}`,
+    })
+    for (const { item } of pending) {
+      await this.deps.audit.logOrThrow('admin_review_read', {
+        actorUserId: adminUserId,
+        targetType: item.target.type,
+        targetId: targetId(item.target),
+      })
+    }
+
+    const items: PendingModerationItem[] = []
+    for (const { item, content } of pending) {
+      items.push({ ...item, content: await content() })
     }
     return items
   }
@@ -189,18 +226,16 @@ export class AdminService {
     return items.slice(0, 200)
   }
 
-  /** Full decrypted conversation for review — every read is audited. */
-  async getThreadForReview(
-    threadId: string,
-    adminUserId: string,
-  ): Promise<AdminThreadDetail | null> {
+  /**
+   * Full decrypted conversation for review — every read is audited
+   * (fail-closed) and only risk-relevant threads open at all (ADR-019:
+   * ordinary conversations are never browsed). A thread qualifies when
+   * at least one message's latest verdict is high/medium, is flagged for
+   * spot-check, or has been reported; otherwise → forbidden.
+   */
+  async getThreadForReview(threadId: string, adminUserId: string): Promise<AdminThreadDetail> {
     const thread = await this.deps.threads?.getById(threadId)
-    if (!thread) return null
-    await this.deps.audit.log('admin_review_read', {
-      actorUserId: adminUserId,
-      targetType: 'thread',
-      targetId: threadId,
-    })
+    if (!thread) throw new AdminError('thread_not_found')
 
     const latestByMessage = new Map<string, ModerationRecord>()
     for (const r of (await this.deps.records?.listLatestMessageRecords()) ?? []) {
@@ -210,6 +245,22 @@ export class AdminService {
     for (const r of (await this.deps.reports?.listAll()) ?? []) {
       reportCount.set(r.messageId, (reportCount.get(r.messageId) ?? 0) + 1)
     }
+
+    const records = await this.deps.messages.listForThread(threadId)
+    const riskRelevant = records.some((m) => {
+      const record = latestByMessage.get(m.id)
+      return (
+        (record !== undefined && (record.riskLevel !== 'low' || record.flagged)) ||
+        (reportCount.get(m.id) ?? 0) > 0
+      )
+    })
+    if (!riskRelevant) throw new AdminError('forbidden')
+
+    await this.deps.audit.logOrThrow('admin_review_read', {
+      actorUserId: adminUserId,
+      targetType: 'thread',
+      targetId: threadId,
+    })
 
     const participants = await Promise.all(
       [thread.userAId, thread.userBId].map(async (userId) => {
@@ -224,7 +275,7 @@ export class AdminService {
     const nameByUser = new Map(participants.map((p) => [p.userId, p.displayName]))
 
     const messages = await Promise.all(
-      (await this.deps.messages.listForThread(threadId)).map(async (m) => {
+      records.map(async (m) => {
         const record = latestByMessage.get(m.id)
         return {
           id: m.id,

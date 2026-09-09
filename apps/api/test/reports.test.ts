@@ -6,6 +6,7 @@ import type { ModerationVerdict, Moderator } from '../src/moderation/moderator.j
 import {
   authHeader,
   buildTestApp,
+  joinEvent,
   jsonHeaders,
   openRecruitWindow,
 } from './helpers.js'
@@ -127,6 +128,8 @@ async function setupThread(escalationModerator?: Moderator) {
     ...(escalationModerator ? { escalationModerator } : {}),
     adminEmails: ['admin@example.gov'],
   })
+  await joinEvent(t, SLUG, 'owner@example.com')
+  await joinEvent(t, SLUG, 'applicant@example.com', 'looking_for_team')
   const teamRes = await t.app.request(`/api/events/${SLUG}/teams`, {
     method: 'POST',
     headers: jsonHeaders('owner@example.com'),

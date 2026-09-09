@@ -1,7 +1,16 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import type { ApplicationView, TeamDetail, TeamSummary } from '@teamup/shared'
 import { loadEventSeeds } from '../src/events/seed-loader.js'
-import { authHeader, buildTestApp, jsonHeaders, openRecruitWindow, seedVariant } from './helpers.js'
+import type { ModerationContext, ModerationVerdict } from '../src/moderation/moderator.js'
+import {
+  authHeader,
+  buildTestApp,
+  joinEvent,
+  jsonHeaders,
+  openRecruitWindow,
+  seedVariant,
+  userIdOf as resolveUserId,
+} from './helpers.js'
 
 const baseSeeds = loadEventSeeds()
 // Pick events by their properties — never by hardcoded slug or numbers.
@@ -24,6 +33,7 @@ beforeEach(() => {
 })
 
 async function createTeam(slug: string, ownerEmail: string, name = '測試隊', pitch = '') {
+  await joinEvent(t, slug, ownerEmail)
   const res = await t.app.request(`/api/events/${slug}/teams`, {
     method: 'POST',
     headers: jsonHeaders(ownerEmail),
@@ -32,7 +42,10 @@ async function createTeam(slug: string, ownerEmail: string, name = '測試隊', 
   return { res, body: (await res.json()) as TeamDetail }
 }
 
+/** Apply as an event participant (participation is created on the way). */
 async function applyTo(teamId: string, email: string, message = '') {
+  const team = await t.teamRepo.getById(teamId)
+  if (team) await joinEvent(t, team.eventSlug, email, 'looking_for_team')
   return t.app.request(`/api/teams/${teamId}/applications`, {
     method: 'POST',
     headers: jsonHeaders(email),
@@ -66,6 +79,8 @@ const teamDetail = async (teamId: string, email?: string) => {
   return (await res.json()) as TeamDetail
 }
 
+const userIdOf = (email: string) => resolveUserId(t, email)
+
 describe('team creation', () => {
   it('creates a team with the owner as first member', async () => {
     const { res, body } = await createTeam(EX, 'owner@example.com', '流浪貓派', '做一個市政 App')
@@ -86,6 +101,7 @@ describe('team creation', () => {
         review: () => Promise.resolve({ riskLevel: 'medium' as const, categories: [] }),
       },
     })
+    await joinEvent(cautious, EX, 'owner@example.com')
     const res = await cautious.app.request(`/api/events/${EX}/teams`, {
       method: 'POST',
       headers: jsonHeaders('owner@example.com'),
@@ -125,6 +141,7 @@ describe('team creation', () => {
   })
 
   it('rejects needed-role keys not in the event dictionary', async () => {
+    await joinEvent(t, EX, 'owner@example.com')
     const res = await t.app.request(`/api/events/${EX}/teams`, {
       method: 'POST',
       headers: jsonHeaders('owner@example.com'),
@@ -149,9 +166,73 @@ describe('team creation', () => {
   })
 })
 
+describe('event eligibility (participation gate)', () => {
+  it('a user who never joined the event cannot open a team', async () => {
+    const res = await t.app.request(`/api/events/${EX}/teams`, {
+      method: 'POST',
+      headers: jsonHeaders('ghost@example.com'),
+      body: JSON.stringify({ name: '幽靈隊' }),
+    })
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toBe('participation_required')
+  })
+
+  it('an unanswered adult check blocks team creation when the event asks for it', async () => {
+    // Store a participation that skipped the adult answer by bypassing
+    // the API validation (repo-level), then try to open a team.
+    await t.app.request('/api/me', { headers: authHeader('vague@example.com') })
+    await t.participantRepo.upsert({
+      eventSlug: EX,
+      userId: await userIdOf('vague@example.com'),
+      intent: 'has_team',
+      preferredRoles: [],
+      skills: [],
+      blurb: '',
+      customTags: [],
+      blurbVisibility: 'published',
+      isAdult: null,
+      guardianConsentConfirmed: false,
+    })
+    expect(exclusiveSeed.event.requiresAdultCheck).toBe(true)
+    const res = await t.app.request(`/api/events/${EX}/teams`, {
+      method: 'POST',
+      headers: jsonHeaders('vague@example.com'),
+      body: JSON.stringify({ name: '沒回答年齡' }),
+    })
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toBe('participation_required')
+  })
+
+  it('applying without a participation record is refused', async () => {
+    const { body: team } = await createTeam(EX, 'owner@example.com')
+    await t.app.request('/api/me', { headers: authHeader('drifter@example.com') })
+    const res = await t.app.request(`/api/teams/${team.id}/applications`, {
+      method: 'POST',
+      headers: jsonHeaders('drifter@example.com'),
+      body: JSON.stringify({ message: '' }),
+    })
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toBe('participation_required')
+  })
+
+  it('owners cannot invite someone who is not in the event (closes cross-event invites)', async () => {
+    const { body: team } = await createTeam(EX, 'owner@example.com')
+    // The invitee only ever joined the OTHER event.
+    await joinEvent(t, NX, 'elsewhere@example.com')
+    const res = await t.app.request(`/api/teams/${team.id}/invitations`, {
+      method: 'POST',
+      headers: jsonHeaders('owner@example.com'),
+      body: JSON.stringify({ userId: await userIdOf('elsewhere@example.com'), message: '' }),
+    })
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toBe('participation_required')
+  })
+})
+
 describe('team list filters', () => {
   it('filters by needed role from the event dictionary', async () => {
     const roleKey = exclusiveSeed.roles[0]!.key
+    await joinEvent(t, EX, 'a@example.com')
     await t.app.request(`/api/events/${EX}/teams`, {
       method: 'POST',
       headers: jsonHeaders('a@example.com'),
@@ -276,17 +357,14 @@ describe('applications and joining', () => {
 
   it('invite flow: owner invites, invitee accepts', async () => {
     const { body: team } = await createTeam(EX, 'owner@example.com')
-    // Invitee must exist (they logged in at least once).
-    await t.app.request('/api/me', { headers: authHeader('invitee@example.com') })
+    // Invitee must be in the event (they filled in their participation).
+    await joinEvent(t, EX, 'invitee@example.com', 'looking_for_team')
     const people = await t.app.request(`/api/events/${EX}/participants`)
     expect(people.status).toBe(200)
 
     const detailBefore = await teamDetail(team.id, 'invitee@example.com')
     expect(detailBefore.viewerIsMember).toBe(false)
 
-    // Find the invitee's userId via their own profile-driven flow: the
-    // owner would normally get it from the participants list; here we
-    // read it from the application record itself.
     const inviteRes = await t.app.request(`/api/teams/${team.id}/invitations`, {
       method: 'POST',
       headers: jsonHeaders('owner@example.com'),
@@ -320,6 +398,220 @@ describe('applications and joining', () => {
       headers: authHeader('joiner@example.com'),
     })
     expect(selfWithdraw.status).toBe(200)
+  })
+})
+
+describe('application state guards', () => {
+  it('a settled application cannot be decided again (reject after accept → not_pending)', async () => {
+    const { body: team } = await createTeam(EX, 'owner@example.com')
+    const application = (await (await applyTo(team.id, 'joiner@example.com')).json()) as ApplicationView
+    expect((await respond(application.id, 'owner@example.com', 'accept')).status).toBe(200)
+    const again = await respond(application.id, 'owner@example.com', 'reject')
+    expect(again.status).toBe(409)
+    expect(((await again.json()) as { error: string }).error).toBe('not_pending')
+    expect((await t.applicationRepo.getById(application.id))?.status).toBe('accepted')
+  })
+
+  it('concurrent accepts of one application admit the member once and never overwrite the status', async () => {
+    const { body: team } = await createTeam(EX, 'owner@example.com')
+    const application = (await (await applyTo(team.id, 'joiner@example.com')).json()) as ApplicationView
+    const results = await Promise.all([
+      respond(application.id, 'owner@example.com', 'accept'),
+      respond(application.id, 'owner@example.com', 'accept'),
+    ])
+    expect(results.map((r) => r.status).sort()).toEqual([200, 409])
+    expect((await t.applicationRepo.getById(application.id))?.status).toBe('accepted')
+    expect((await teamDetail(team.id)).memberCount).toBe(2)
+  })
+
+  it('an application to a team that closed recruiting cannot be accepted', async () => {
+    const { body: team } = await createTeam(EX, 'owner@example.com')
+    const application = (await (await applyTo(team.id, 'joiner@example.com')).json()) as ApplicationView
+    const close = await t.app.request(`/api/teams/${team.id}`, {
+      method: 'PATCH',
+      headers: jsonHeaders('owner@example.com'),
+      body: JSON.stringify({ status: 'closed' }),
+    })
+    expect(close.status).toBe(200)
+    const res = await respond(application.id, 'owner@example.com', 'accept')
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toBe('not_recruiting')
+    expect((await t.applicationRepo.getById(application.id))?.status).toBe('pending')
+  })
+
+  it('a high-risk note voids the application (status blocked, hidden from everyone)', async () => {
+    const strict = buildTestApp([exclusiveSeed], {
+      moderator: {
+        review: (): Promise<ModerationVerdict> =>
+          Promise.resolve({ riskLevel: 'high', categories: ['financial_scam'] }),
+      },
+    })
+    await joinEvent(strict, EX, 'owner@example.com')
+    const teamRes = await strict.app.request(`/api/events/${EX}/teams`, {
+      method: 'POST',
+      headers: jsonHeaders('owner@example.com'),
+      body: JSON.stringify({ name: '被騷擾的隊' }),
+    })
+    const team = (await teamRes.json()) as TeamDetail
+    await joinEvent(strict, EX, 'scammer@example.com', 'looking_for_team')
+    const res = await strict.app.request(`/api/teams/${team.id}/applications`, {
+      method: 'POST',
+      headers: jsonHeaders('scammer@example.com'),
+      body: JSON.stringify({ message: '先匯保證金再說' }),
+    })
+    expect(res.status).toBe(201)
+    const application = (await res.json()) as ApplicationView
+    expect(application.status).toBe('blocked')
+    expect(application.messageVisibility).toBe('blocked')
+    expect(application.message).toBeNull()
+    // Not in the owner's pending queue, and cannot be accepted.
+    const ownerList = await strict.app.request(`/api/teams/${team.id}/applications`, {
+      headers: authHeader('owner@example.com'),
+    })
+    expect(((await ownerList.json()) as { applications: unknown[] }).applications).toHaveLength(0)
+    const accept = await strict.app.request(`/api/applications/${application.id}/respond`, {
+      method: 'POST',
+      headers: jsonHeaders('owner@example.com'),
+      body: JSON.stringify({ action: 'accept' }),
+    })
+    expect(accept.status).toBe(409)
+  })
+})
+
+describe('owner-only writes refuse non-owners before doing anything', () => {
+  /** Counts name reviews so we can prove none happened for a non-owner. */
+  const countingNames = () => {
+    const calls: string[] = []
+    const moderator = {
+      review: (text: string, ctx?: ModerationContext): Promise<ModerationVerdict> => {
+        if (ctx?.contentType === 'name') calls.push(text)
+        return Promise.resolve({ riskLevel: 'low', categories: ['none'] })
+      },
+    }
+    return { calls, moderator }
+  }
+
+  it('PATCH /api/teams/:id by a non-owner is 403 and triggers no name review', async () => {
+    const { calls, moderator } = countingNames()
+    const world = buildTestApp([exclusiveSeed], { nameModerator: moderator })
+    await joinEvent(world, EX, 'owner@example.com')
+    const created = await world.app.request(`/api/events/${EX}/teams`, {
+      method: 'POST',
+      headers: jsonHeaders('owner@example.com'),
+      body: JSON.stringify({ name: '原名' }),
+    })
+    const team = (await created.json()) as TeamDetail
+    expect(calls).toHaveLength(1) // the legitimate creation review
+
+    const res = await world.app.request(`/api/teams/${team.id}`, {
+      method: 'PATCH',
+      headers: jsonHeaders('intruder@example.com'),
+      body: JSON.stringify({ name: '改成別的' }),
+    })
+    expect(res.status).toBe(403)
+    expect(calls).toHaveLength(1) // no paid review for the intruder
+    expect(world.moderationRecords.records.filter((r) => r.targetType === 'team_name')).toHaveLength(1)
+  })
+
+  it('renaming to the same name skips the review; a real rename is reviewed once', async () => {
+    const { calls, moderator } = countingNames()
+    const world = buildTestApp([exclusiveSeed], { nameModerator: moderator })
+    await joinEvent(world, EX, 'owner@example.com')
+    const created = await world.app.request(`/api/events/${EX}/teams`, {
+      method: 'POST',
+      headers: jsonHeaders('owner@example.com'),
+      body: JSON.stringify({ name: '原名' }),
+    })
+    const team = (await created.json()) as TeamDetail
+    const same = await world.app.request(`/api/teams/${team.id}`, {
+      method: 'PATCH',
+      headers: jsonHeaders('owner@example.com'),
+      body: JSON.stringify({ name: '原名', status: 'closed' }),
+    })
+    expect(same.status).toBe(200)
+    expect(calls).toHaveLength(1)
+    const renamed = await world.app.request(`/api/teams/${team.id}`, {
+      method: 'PATCH',
+      headers: jsonHeaders('owner@example.com'),
+      body: JSON.stringify({ name: '新名' }),
+    })
+    expect(renamed.status).toBe(200)
+    expect(calls).toHaveLength(2)
+  })
+
+  it('PUT contacts, GET applications and POST invitations are 403 for non-owners', async () => {
+    const { body: team } = await createTeam(EX, 'owner@example.com')
+    await joinEvent(t, EX, 'member@example.com')
+    const memberId = await userIdOf('member@example.com')
+    const stranger = jsonHeaders('stranger@example.com')
+
+    const contacts = await t.app.request(`/api/teams/${team.id}/contacts`, {
+      method: 'PUT',
+      headers: stranger,
+      body: JSON.stringify({ contacts: [{ userId: memberId, rank: 1 }] }),
+    })
+    expect(contacts.status).toBe(403)
+
+    const list = await t.app.request(`/api/teams/${team.id}/applications`, { headers: stranger })
+    expect(list.status).toBe(403)
+
+    const invite = await t.app.request(`/api/teams/${team.id}/invitations`, {
+      method: 'POST',
+      headers: stranger,
+      body: JSON.stringify({ userId: memberId, message: '' }),
+    })
+    expect(invite.status).toBe(403)
+  })
+
+  it('name changes are rate limited per account', async () => {
+    const world = buildTestApp([exclusiveSeed], { rateLimits: { nameChangesPerHour: 2 } })
+    const rename = (name: string) =>
+      world.app.request('/api/me', {
+        method: 'PATCH',
+        headers: jsonHeaders('fickle@example.com'),
+        body: JSON.stringify({ displayName: name }),
+      })
+    expect((await rename('一')).status).toBe(200)
+    expect((await rename('二')).status).toBe(200)
+    const third = await rename('三')
+    expect(third.status).toBe(429)
+    expect(((await third.json()) as { error: string }).error).toBe('rate_limited')
+  })
+
+  it('applies and invitations are rate limited per account', async () => {
+    const world = buildTestApp([nonExclusiveSeed], {
+      rateLimits: { appliesPerDay: 1, invitationsPerDay: 1 },
+    })
+    await joinEvent(world, NX, 'owner@example.com')
+    const mk = async (name: string) =>
+      (await (
+        await world.app.request(`/api/events/${NX}/teams`, {
+          method: 'POST',
+          headers: jsonHeaders('owner@example.com'),
+          body: JSON.stringify({ name }),
+        })
+      ).json()) as TeamDetail
+    const [a, b] = [await mk('甲'), await mk('乙')]
+    await joinEvent(world, NX, 'eager@example.com', 'looking_for_team')
+    const apply = (teamId: string) =>
+      world.app.request(`/api/teams/${teamId}/applications`, {
+        method: 'POST',
+        headers: jsonHeaders('eager@example.com'),
+        body: JSON.stringify({ message: '' }),
+      })
+    expect((await apply(a.id)).status).toBe(201)
+    expect((await apply(b.id)).status).toBe(429)
+
+    await joinEvent(world, NX, 'guest1@example.com')
+    await joinEvent(world, NX, 'guest2@example.com')
+    const invite = async (email: string) =>
+      world.app.request(`/api/teams/${a.id}/invitations`, {
+        method: 'POST',
+        headers: jsonHeaders('owner@example.com'),
+        body: JSON.stringify({ userId: await resolveUserId(world, email), message: '' }),
+      })
+    expect((await invite('guest1@example.com')).status).toBe(201)
+    expect((await invite('guest2@example.com')).status).toBe(429)
   })
 })
 
@@ -418,16 +710,6 @@ describe('my team', () => {
     expect(((await mine.json()) as { team: TeamDetail }).team.id).toBe(team.id)
   })
 })
-
-/** Resolve a user's id by logging them in and reading their team-free profile. */
-async function userIdOf(email: string): Promise<string> {
-  await t.app.request('/api/me', { headers: authHeader(email) })
-  const { emailLookupHmac } = await import('../src/crypto/email.js')
-  const { TEST_PEPPER } = await import('./helpers.js')
-  const record = await t.userRepo.findByLookup(emailLookupHmac(email, TEST_PEPPER))
-  if (!record) throw new Error(`user ${email} not provisioned`)
-  return record.id
-}
 
 describe('team deletion', () => {
   const del = (teamId: string, email: string) =>

@@ -51,7 +51,7 @@ export class MemoryApplicationRepository implements ApplicationRepository {
 
   async hasActiveRelationship(eventSlug: string, userA: string, userB: string): Promise<boolean> {
     for (const record of this.records.values()) {
-      if (record.status !== 'pending' && record.status !== 'accepted') continue
+      if (record.status !== 'pending') continue
       const team = await this.teams.getById(record.teamId)
       if (team?.eventSlug !== eventSlug) continue
       const pair =
@@ -62,10 +62,15 @@ export class MemoryApplicationRepository implements ApplicationRepository {
     return false
   }
 
-  updateStatus(id: string, status: ApplicationStatus): Promise<void> {
+  updateStatus(
+    id: string,
+    status: ApplicationStatus,
+    from: ApplicationStatus = 'pending',
+  ): Promise<boolean> {
     const record = this.records.get(id)
-    if (record) record.status = status
-    return Promise.resolve()
+    if (!record || record.status !== from) return Promise.resolve(false)
+    record.status = status
+    return Promise.resolve(true)
   }
 
   updateMessageVisibility(id: string, visibility: ApplicationRecord['messageVisibility']) {

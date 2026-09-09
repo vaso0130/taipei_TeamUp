@@ -1,4 +1,4 @@
-import { and, count, desc, eq, gte, inArray } from 'drizzle-orm'
+import { and, count, countDistinct, desc, eq, gte, inArray, lte } from 'drizzle-orm'
 import type { Db } from '../db/client.js'
 import { moderationRecords } from '../db/schema.js'
 import type { ModerationCategory, RiskLevel } from './moderator.js'
@@ -24,8 +24,14 @@ export interface ModerationRecord {
 
 export interface ModerationRecordRepository {
   create(record: ModerationRecord): Promise<void>
-  /** High-risk strikes for the suspension rule (spec §5.5). */
+  /**
+   * High-risk strikes for the suspension rule (spec §5.5), counted per
+   * DISTINCT content hash: a replayed task or a human confirmation of the
+   * same text is one strike, not two.
+   */
   countHighSince(subjectUserId: string, since: Date): Promise<number>
+  /** Retention (spec §4 / privacy policy): purge verdicts older than the cutoff. */
+  purgeBefore(cutoff: Date): Promise<number>
   /**
    * Latest verdict per message (across 'message' and 'reported_message'
    * target types) — the admin risk overview's raw material.
@@ -57,14 +63,25 @@ export class MemoryModerationRecordRepository implements ModerationRecordReposit
   }
 
   countHighSince(subjectUserId: string, since: Date): Promise<number> {
-    return Promise.resolve(
-      this.records.filter(
-        (r) =>
-          r.subjectUserId === subjectUserId &&
-          r.riskLevel === 'high' &&
-          new Date(r.createdAt) >= since,
-      ).length,
+    const hashes = new Set(
+      this.records
+        .filter(
+          (r) =>
+            r.subjectUserId === subjectUserId &&
+            r.riskLevel === 'high' &&
+            new Date(r.createdAt) >= since,
+        )
+        .map((r) => r.contentSha256),
     )
+    return Promise.resolve(hashes.size)
+  }
+
+  purgeBefore(cutoff: Date): Promise<number> {
+    const keep = this.records.filter((r) => new Date(r.createdAt) > cutoff)
+    const purged = this.records.length - keep.length
+    this.records.length = 0
+    this.records.push(...keep)
+    return Promise.resolve(purged)
   }
 
   listLatestMessageRecords(): Promise<ModerationRecord[]> {
@@ -146,7 +163,7 @@ export class DbModerationRecordRepository implements ModerationRecordRepository 
 
   async countHighSince(subjectUserId: string, since: Date): Promise<number> {
     const rows = await this.db
-      .select({ id: moderationRecords.id })
+      .select({ n: countDistinct(moderationRecords.contentSha256) })
       .from(moderationRecords)
       .where(
         and(
@@ -155,7 +172,15 @@ export class DbModerationRecordRepository implements ModerationRecordRepository 
           gte(moderationRecords.createdAt, since),
         ),
       )
-    return rows.length
+    return Number(rows[0]?.n ?? 0)
+  }
+
+  async purgeBefore(cutoff: Date): Promise<number> {
+    const purged = await this.db
+      .delete(moderationRecords)
+      .where(lte(moderationRecords.createdAt, cutoff))
+      .returning({ id: moderationRecords.id })
+    return purged.length
   }
 
   async listLatestMessageRecords(): Promise<ModerationRecord[]> {

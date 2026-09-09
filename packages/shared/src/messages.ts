@@ -1,14 +1,17 @@
 import { z } from 'zod'
 import type { ContentVisibility } from './profile.js'
+import { multiLineText } from './text.js'
+
+const messageBody = multiLineText(1000, 1, '訊息不可空白')
 
 export const SendMessageSchema = z.object({
-  body: z.string().trim().min(1, '訊息不可空白').max(1000, '訊息最多 1000 字'),
+  body: messageBody,
 })
 export type SendMessageInput = z.infer<typeof SendMessageSchema>
 
 export const StartThreadSchema = z.object({
   toUserId: z.string().uuid(),
-  body: z.string().trim().min(1, '訊息不可空白').max(1000, '訊息最多 1000 字'),
+  body: messageBody,
 })
 export type StartThreadInput = z.infer<typeof StartThreadSchema>
 

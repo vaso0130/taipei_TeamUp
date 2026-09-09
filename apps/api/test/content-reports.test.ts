@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import type { TeamDetail } from '@teamup/shared'
 import type { ModerationVerdict, Moderator } from '../src/moderation/moderator.js'
 import { loadEventSeeds } from '../src/events/seed-loader.js'
-import { authHeader, buildTestApp, jsonHeaders, openRecruitWindow } from './helpers.js'
+import { authHeader, buildTestApp, joinEvent, jsonHeaders, openRecruitWindow } from './helpers.js'
 import { emailLookupHmac } from '../src/crypto/email.js'
 import { TEST_PEPPER } from './helpers.js'
 
@@ -31,6 +31,7 @@ const userIdOf = async (email: string) =>
   (await t.userRepo.findByLookup(emailLookupHmac(email, TEST_PEPPER)))!.id
 
 const createTeam = async (email: string, name: string, pitch = '') => {
+  await joinEvent(t, SLUG, email)
   const res = await t.app.request(`/api/events/${SLUG}/teams`, {
     method: 'POST',
     headers: jsonHeaders(email),
@@ -126,6 +127,16 @@ describe('participant reports', () => {
       `${SLUG}/${targetId}`,
     )
     expect(reports[0]!.status).toBe('resolved')
+  })
+
+  it('content reports are rate limited per account', async () => {
+    t = buildTestApp([seed], { rateLimits: { reportsPerHour: 1 } })
+    const a = await createTeam('a@example.com', '甲隊')
+    const b = await createTeam('b@example.com', '乙隊')
+    expect((await reportTeam('zealot@example.com', a.id)).status).toBe(201)
+    const second = await reportTeam('zealot@example.com', b.id)
+    expect(second.status).toBe(429)
+    expect(((await second.json()) as { error: string }).error).toBe('rate_limited')
   })
 
   it('404s on a non-participant and rejects self-reports', async () => {

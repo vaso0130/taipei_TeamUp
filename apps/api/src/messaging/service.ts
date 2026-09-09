@@ -4,7 +4,7 @@ import type { ApplicationRepository } from '../applications/repository.js'
 import type { AuditLogger } from '../audit/log.js'
 import type { FieldCipher } from '../crypto/envelope.js'
 import type { EventRepository } from '../events/repository.js'
-import type { ModerationQueue, ModerationService } from '../moderation/service.js'
+import { safeEnqueue, type ModerationQueue, type ModerationService } from '../moderation/service.js'
 import type { ReportRepository } from '../reports/repository.js'
 import type { TeamRepository } from '../teams/repository.js'
 import type { UserRepository } from '../users/repository.js'
@@ -166,7 +166,7 @@ export class MessagingService {
     try {
       visibility = await this.moderation.processSync({ type: 'message', messageId: record.id })
     } catch {
-      await this.moderationQueue.enqueue({ type: 'message', messageId: record.id })
+      await safeEnqueue(this.moderationQueue, { type: 'message', messageId: record.id })
       visibility = (await this.messages.getById(record.id))?.visibility ?? 'pending_review'
     }
 
@@ -206,7 +206,7 @@ export class MessagingService {
     if (message.visibility === 'published') {
       await this.messages.updateVisibility(messageId, 'pending_review')
     }
-    await this.moderationQueue.enqueue({ type: 'reported_message', messageId })
+    await safeEnqueue(this.moderationQueue, { type: 'reported_message', messageId })
     // The report reason is an enum — safe to audit verbatim.
     await this.audit?.log('message_report', {
       actorUserId: reporterId,

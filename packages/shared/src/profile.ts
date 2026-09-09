@@ -1,4 +1,6 @@
 import { z } from 'zod'
+import { SCHEMA_LIMITS } from './event-config.js'
+import { multiLineText, singleLineText } from './text.js'
 
 /** Participation intent within one event. */
 export const PARTICIPANT_INTENTS = ['looking_for_team', 'has_team', 'browsing'] as const
@@ -28,15 +30,19 @@ export type UpdateMeInput = z.infer<typeof UpdateMeSchema>
  */
 export const ParticipationInputSchema = z.object({
   intent: z.enum(PARTICIPANT_INTENTS),
-  preferredRoles: z.array(z.string()).max(20).default([]),
-  skills: z.array(z.string()).max(50).default([]),
+  preferredRoles: z.array(z.string().max(50)).max(SCHEMA_LIMITS.maxDictionaryOptions).default([]),
+  skills: z.array(z.string().max(50)).max(SCHEMA_LIMITS.maxDictionaryOptions).default([]),
   /** Free text — goes through moderation before becoming public. */
-  blurb: z.string().max(500).default(''),
+  blurb: multiLineText(500).default(''),
   /**
-   * Free-form tags; schema gives a generous ceiling, the service
-   * enforces the event's own maxCustomTags / customTagMaxLength.
+   * Free-form tags; the schema ceiling equals the event-config ceiling
+   * (SCHEMA_LIMITS), the service enforces the event's own
+   * maxCustomTags / customTagMaxLength.
    */
-  customTags: z.array(z.string().trim().min(1).max(30)).max(20).default([]),
+  customTags: z
+    .array(singleLineText(SCHEMA_LIMITS.maxCustomTagLength, 1))
+    .max(SCHEMA_LIMITS.maxCustomTags)
+    .default([]),
   /**
    * Only asked (and required) when the event has requiresAdultCheck.
    * We never store a birth date — a single boolean only (spec §6.3).

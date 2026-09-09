@@ -2,7 +2,12 @@ import { and, count, desc, eq, lte } from 'drizzle-orm'
 import type { Db } from '../db/client.js'
 import { isUniqueViolation } from '../db/pg-errors.js'
 import { users } from '../db/schema.js'
-import { UniqueViolationError, type UserRecord, type UserRepository } from './repository.js'
+import {
+  UniqueViolationError,
+  type HardDeleteResult,
+  type UserRecord,
+  type UserRepository,
+} from './repository.js'
 
 type UserRow = typeof users.$inferSelect
 
@@ -78,11 +83,42 @@ export class DbUserRepository implements UserRepository {
       .where(eq(users.id, id))
   }
 
-  async hardDeleteBefore(cutoff: Date): Promise<number> {
-    const deleted = await this.db
-      .delete(users)
+  async updateEmailLookup(id: string, lookup: Buffer): Promise<void> {
+    try {
+      await this.db
+        .update(users)
+        .set({ emailLookup: lookup, updatedAt: new Date() })
+        .where(eq(users.id, id))
+    } catch (err) {
+      if (isUniqueViolation(err)) throw new UniqueViolationError('users_email_lookup_idx')
+      throw err
+    }
+  }
+
+  /**
+   * Row by row on purpose: one dangling foreign key (a team that still
+   * names the user as owner, say) must fail that row only — a single
+   * multi-row DELETE would roll back everyone's deletion together.
+   */
+  async hardDeleteBefore(cutoff: Date): Promise<HardDeleteResult> {
+    const due = await this.db
+      .select({ id: users.id })
+      .from(users)
       .where(and(eq(users.status, 'deleted'), lte(users.deletedAt, cutoff)))
-      .returning({ id: users.id })
-    return deleted.length
+    let deleted = 0
+    let failed = 0
+    for (const { id } of due) {
+      try {
+        const removed = await this.db.delete(users).where(eq(users.id, id)).returning({ id: users.id })
+        deleted += removed.length
+      } catch (err) {
+        failed += 1
+        // Only the id and the error class — never anything decrypted.
+        console.error(
+          `hard delete failed for user ${id}: ${err instanceof Error ? err.name : 'unknown error'}`,
+        )
+      }
+    }
+    return { deleted, failed }
   }
 }

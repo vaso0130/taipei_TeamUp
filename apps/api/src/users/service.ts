@@ -1,4 +1,4 @@
-import { randomInt } from 'node:crypto'
+import { randomBytes, randomInt } from 'node:crypto'
 import { uuidv7 } from 'uuidv7'
 import type { MeView } from '@teamup/shared'
 import { emailHint, emailLookupHmac, normalizeEmail } from '../crypto/email.js'
@@ -7,21 +7,40 @@ import { UniqueViolationError, type UserRecord, type UserRepository } from './re
 
 const defaultDisplayName = () => `新夥伴${randomInt(1000, 10000)}`
 
+export interface UserServiceOptions {
+  /**
+   * The pepper that was in force before the current one. During a
+   * rotation, a lookup miss is retried with it and a hit is re-hashed
+   * to the current pepper on the spot (lazy migration on login).
+   */
+  previousPepper?: string
+}
+
 export class UserService {
   constructor(
     private readonly repo: UserRepository,
     private readonly cipher: FieldCipher,
     private readonly pepper: string,
+    private readonly options: UserServiceOptions = {},
   ) {}
 
   /**
    * Login == first use: provision the user row on first authenticated
-   * request. Identity key is the HMAC of the verified email.
+   * request. Identity key is the HMAC of the canonical email.
+   *
+   * A soft-deleted row is NOT revived: the person asked for deletion, so
+   * their old row stays dead (hidden, purged after the grace period) and
+   * a brand-new empty account is created for the same address. The old
+   * row's lookup is replaced with a random tombstone so the unique index
+   * frees the address.
    */
   async ensureUser(email: string): Promise<UserRecord> {
     const lookup = emailLookupHmac(email, this.pepper)
-    const existing = await this.repo.findByLookup(lookup)
-    if (existing) return existing
+    const existing = (await this.repo.findByLookup(lookup)) ?? (await this.findByPreviousPepper(email, lookup))
+    if (existing && existing.status !== 'deleted') return existing
+    if (existing) {
+      await this.repo.updateEmailLookup(existing.id, randomBytes(lookup.length))
+    }
 
     const record: UserRecord = {
       id: uuidv7(),
@@ -40,6 +59,26 @@ export class UserService {
       }
       throw err
     }
+  }
+
+  /** Pepper rotation: find under the previous pepper and re-hash to the current one. */
+  private async findByPreviousPepper(
+    email: string,
+    currentLookup: Buffer,
+  ): Promise<UserRecord | null> {
+    if (!this.options.previousPepper) return null
+    const old = await this.repo.findByLookup(emailLookupHmac(email, this.options.previousPepper))
+    if (!old) return null
+    try {
+      await this.repo.updateEmailLookup(old.id, currentLookup)
+    } catch (err) {
+      // Someone already owns the new value (a second row for the same
+      // address, e.g. created before canonicalization) — leave the old
+      // row untouched and let the current-pepper row win.
+      if (err instanceof UniqueViolationError) return this.repo.findByLookup(currentLookup)
+      throw err
+    }
+    return { ...old, emailLookup: currentLookup }
   }
 
   async toMeView(record: UserRecord): Promise<MeView> {

@@ -26,13 +26,21 @@ export interface ApplicationRepository {
   listForTeam(teamId: string, status?: ApplicationStatus): Promise<ApplicationRecord[]>
   /** Applications where the user is the (would-be) joiner, within one event. */
   listForUser(eventSlug: string, userId: string): Promise<ApplicationRecord[]>
-  updateStatus(id: string, status: ApplicationStatus): Promise<void>
+  /**
+   * Guarded state transition: the row moves to `status` only if it is
+   * still in `from` (default: pending). Returns whether a row changed, so
+   * two concurrent deciders cannot both "win" and a settled application
+   * is never overwritten.
+   */
+  updateStatus(id: string, status: ApplicationStatus, from?: ApplicationStatus): Promise<boolean>
   /** After an accept in an exclusive event: void the user's other pending applications. */
   withdrawPendingForUser(eventSlug: string, userId: string, exceptTeamId: string): Promise<void>
   /**
-   * Whether a live application (pending or accepted) connects the two
-   * users — one as applicant, the other as the team's owner. Grants
-   * messaging permission (spec §2.1 item 7).
+   * Whether a PENDING application connects the two users — one as
+   * applicant, the other as the team's owner. Grants messaging permission
+   * while the request is open (spec §2.1 item 7); once accepted, the
+   * shared team membership is the relationship, and once that ends so
+   * does the permission.
    */
   hasActiveRelationship(eventSlug: string, userA: string, userB: string): Promise<boolean>
   updateMessageVisibility(id: string, visibility: ContentVisibility): Promise<void>

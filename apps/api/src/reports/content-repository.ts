@@ -29,6 +29,8 @@ export interface ContentReportRepository {
   ): Promise<ContentReportRecord[]>
   /** Mark every report on the target resolved once a verdict lands. */
   resolveForTarget(targetType: ContentReportTargetType, targetId: string): Promise<void>
+  /** Reports one user filed (their own data export). */
+  listByReporter(reporterUserId: string): Promise<ContentReportRecord[]>
 }
 
 export class MemoryContentReportRepository implements ContentReportRepository {
@@ -63,6 +65,15 @@ export class MemoryContentReportRepository implements ContentReportRepository {
       if (r.targetType === targetType && r.targetId === targetId) r.status = 'resolved'
     }
     return Promise.resolve()
+  }
+
+  listByReporter(reporterUserId: string): Promise<ContentReportRecord[]> {
+    return Promise.resolve(
+      this.records
+        .filter((r) => r.reporterUserId === reporterUserId)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .map((r) => ({ ...r })),
+    )
   }
 }
 
@@ -122,5 +133,14 @@ export class DbContentReportRepository implements ContentReportRepository {
       .where(
         and(eq(contentReports.targetType, targetType), eq(contentReports.targetId, targetId)),
       )
+  }
+
+  async listByReporter(reporterUserId: string): Promise<ContentReportRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(contentReports)
+      .where(eq(contentReports.reporterUserId, reporterUserId))
+      .orderBy(desc(contentReports.createdAt))
+    return rows.map(toRecord)
   }
 }

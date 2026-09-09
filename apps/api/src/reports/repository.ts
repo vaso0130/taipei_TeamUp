@@ -21,6 +21,8 @@ export interface ReportRepository {
   resolveForMessage(messageId: string): Promise<void>
   /** Every report, newest first (admin risk overview; field-test scale). */
   listAll(): Promise<ReportRecord[]>
+  /** Reports one user filed (their own data export). */
+  listByReporter(reporterUserId: string): Promise<ReportRecord[]>
 }
 
 export class MemoryReportRepository implements ReportRepository {
@@ -63,6 +65,15 @@ export class MemoryReportRepository implements ReportRepository {
   listAll(): Promise<ReportRecord[]> {
     return Promise.resolve(
       [...this.records]
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .map((r) => ({ ...r })),
+    )
+  }
+
+  listByReporter(reporterUserId: string): Promise<ReportRecord[]> {
+    return Promise.resolve(
+      this.records
+        .filter((r) => r.reporterUserId === reporterUserId)
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
         .map((r) => ({ ...r })),
     )
