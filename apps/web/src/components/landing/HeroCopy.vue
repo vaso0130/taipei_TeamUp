@@ -28,12 +28,12 @@ const LINES = ['正在找神隊友嗎？', '你來對地方了。', '快來看�
       class="led-line hero-line"
       :style="{ '--i': i }"
     >
-      {{ line }}
+      <span class="hero-text">{{ line }}</span>
     </p>
 
     <h1 id="hero-title" class="led-line hero-brand" :style="{ '--i': LINES.length }">
-      <span class="font-brand">台北配</span>
-      <span class="hero-brand-sub">配.taipei</span>
+      <span class="font-brand hero-text">台北配</span>
+      <span class="hero-brand-sub hero-text">配.taipei</span>
     </h1>
 
     <p class="hero-cta-row">
@@ -66,6 +66,18 @@ const LINES = ['正在找神隊友嗎？', '你來對地方了。', '快來看�
   --board-dim: #b5c7c1;
   --board-led: #f0b64a;
   color: var(--board-fg);
+}
+
+/*
+ * The copy wrapper (LandingPage) is pointer-events: none so the board's
+ * canvas underneath stays interactive (docs/design/landing-game.md); only
+ * the glyph boxes and the CTA take the pointer back. Text stays selectable,
+ * the CTA stays clickable in every game state.
+ */
+.hero-eyebrow,
+.hero-text,
+.hero-cta {
+  pointer-events: auto;
 }
 
 .hero-eyebrow {
